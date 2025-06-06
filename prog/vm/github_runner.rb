@@ -142,7 +142,6 @@ class Prog::Vm::GithubRunner < Prog::Base
   end
 
   def quota_available?
-    github_runner.installation.project_dataset.for_update.all
     # In existing Github quota calculations, we compare total allocated cpu count
     # with the cpu limit and allow passing the limit once. This is because we
     # check quota and allocate VMs in different labels hence transactions and it
@@ -160,7 +159,7 @@ class Prog::Vm::GithubRunner < Prog::Base
         sum(:used_cores) * 100.0 / sum(:total_cores)
       }.first.to_f
 
-      unless utilization < 70
+      unless utilization < 75
         Clog.emit("Waiting for customer concurrency limit, utilization is high") { [github_runner, {utilization: utilization}] }
         nap rand(5..15)
       end
@@ -361,8 +360,8 @@ class Prog::Vm::GithubRunner < Prog::Base
 
     # We log the remaining limit DockerHub rate limit to analyze it
     docker_quota_limit_command = <<~COMMAND
-      TOKEN=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:ratelimitpreview/test:pull" | jq -r .token)
-      curl -s --head -H "Authorization: Bearer $TOKEN" https://registry-1.docker.io/v2/ratelimitpreview/test/manifests/latest | grep ratelimit
+      TOKEN=$(curl -m 10 -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:ratelimitpreview/test:pull" | jq -r .token)
+      curl -m 10 -s --head -H "Authorization: Bearer $TOKEN" https://registry-1.docker.io/v2/ratelimitpreview/test/manifests/latest | grep ratelimit
     COMMAND
     quota_output = vm.sshable.cmd(docker_quota_limit_command, log: false)
     if quota_output && (match = quota_output.match(/ratelimit-limit:\s*(\d+);w=(\d+).*?ratelimit-remaining:\s*(\d+);w=(\d+).*?docker-ratelimit-source:\s*([^\s]+)/m))

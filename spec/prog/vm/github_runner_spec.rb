@@ -302,26 +302,20 @@ RSpec.describe Prog::Vm::GithubRunner do
 
   describe "#start" do
     it "hops to wait_concurrency_limit if there is no capacity" do
-      dataset = instance_double(Sequel::Dataset, for_update: instance_double(Sequel::Dataset, all: []))
-
       installation = instance_double(GithubInstallation)
       project = instance_double(Project, quota_available?: false, github_installations: [installation], active?: true)
 
       expect(github_runner).to receive(:installation).and_return(installation).at_least(:once)
-      expect(github_runner.installation).to receive(:project_dataset).and_return(dataset)
       expect(github_runner.installation).to receive(:project).and_return(project).at_least(:once)
 
       expect { nx.start }.to hop("wait_concurrency_limit")
     end
 
     it "hops to allocate_vm if there is capacity" do
-      dataset = instance_double(Sequel::Dataset, for_update: instance_double(Sequel::Dataset, all: []))
-
       installation = instance_double(GithubInstallation)
       project = instance_double(Project, quota_available?: true, github_installations: [installation], active?: true)
 
       expect(github_runner).to receive(:installation).and_return(installation).at_least(:once)
-      expect(github_runner.installation).to receive(:project_dataset).and_return(dataset)
       expect(github_runner.installation).to receive(:project).and_return(project).at_least(:once)
 
       expect { nx.start }.to hop("allocate_vm")
@@ -343,39 +337,30 @@ RSpec.describe Prog::Vm::GithubRunner do
     end
 
     it "waits until customer concurrency limit frees up" do
-      dataset = instance_double(Sequel::Dataset, for_update: instance_double(Sequel::Dataset, all: []))
-
       installation = instance_double(GithubInstallation)
       project = instance_double(Project, quota_available?: false, github_installations: [installation])
 
       expect(github_runner).to receive(:installation).and_return(installation).at_least(:once)
-      expect(github_runner.installation).to receive(:project_dataset).and_return(dataset)
       expect(github_runner.installation).to receive(:project).and_return(project).at_least(:once)
 
       expect { nx.wait_concurrency_limit }.to nap
     end
 
     it "hops to allocate_vm when customer concurrency limit frees up" do
-      dataset = instance_double(Sequel::Dataset, for_update: instance_double(Sequel::Dataset, all: []))
-
       installation = instance_double(GithubInstallation)
       project = instance_double(Project, quota_available?: true, github_installations: [installation])
 
       expect(github_runner).to receive(:installation).and_return(installation).at_least(:once)
-      expect(github_runner.installation).to receive(:project_dataset).and_return(dataset)
       expect(github_runner.installation).to receive(:project).and_return(project).at_least(:once)
 
       expect { nx.wait_concurrency_limit }.to hop("allocate_vm")
     end
 
     it "hops to allocate_vm when customer concurrency limit is full but the overall utilization is low" do
-      dataset = instance_double(Sequel::Dataset, for_update: instance_double(Sequel::Dataset, all: []))
-
       installation = instance_double(GithubInstallation)
       project = instance_double(Project, quota_available?: false, github_installations: [installation])
 
       expect(github_runner).to receive(:installation).and_return(installation).at_least(:once)
-      expect(github_runner.installation).to receive(:project_dataset).and_return(dataset)
       expect(github_runner.installation).to receive(:project).and_return(project).at_least(:once)
       VmHost[arch: "x64"].update(used_cores: 4)
       expect { nx.wait_concurrency_limit }.to hop("allocate_vm")
@@ -605,8 +590,8 @@ RSpec.describe Prog::Vm::GithubRunner do
       expect(vmh_sshable).to receive(:cmd).with("sudo ln /vm/9qf22jbv/serial.log /var/log/ubicloud/serials/#{github_runner.ubid}_serial.log")
       expect(sshable).to receive(:cmd).with("journalctl -u runner-script -t 'run-withenv.sh' -t 'systemd' --no-pager | grep -Fv Started")
       expect(sshable).to receive(:cmd).with(<<~COMMAND, log: false)
-        TOKEN=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:ratelimitpreview/test:pull" | jq -r .token)
-        curl -s --head -H "Authorization: Bearer $TOKEN" https://registry-1.docker.io/v2/ratelimitpreview/test/manifests/latest | grep ratelimit
+        TOKEN=$(curl -m 10 -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:ratelimitpreview/test:pull" | jq -r .token)
+        curl -m 10 -s --head -H "Authorization: Bearer $TOKEN" https://registry-1.docker.io/v2/ratelimitpreview/test/manifests/latest | grep ratelimit
       COMMAND
 
       nx.collect_final_telemetry
@@ -619,8 +604,8 @@ RSpec.describe Prog::Vm::GithubRunner do
       expect(vmh_sshable).to receive(:cmd).with("sudo ln /vm/9qf22jbv/serial.log /var/log/ubicloud/serials/#{github_runner.ubid}_serial.log")
       expect(sshable).to receive(:cmd).with("journalctl -u runner-script -t 'run-withenv.sh' -t 'systemd' --no-pager | grep -Fv Started")
       expect(sshable).to receive(:cmd).with(<<~COMMAND, log: false)
-        TOKEN=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:ratelimitpreview/test:pull" | jq -r .token)
-        curl -s --head -H "Authorization: Bearer $TOKEN" https://registry-1.docker.io/v2/ratelimitpreview/test/manifests/latest | grep ratelimit
+        TOKEN=$(curl -m 10 -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:ratelimitpreview/test:pull" | jq -r .token)
+        curl -m 10 -s --head -H "Authorization: Bearer $TOKEN" https://registry-1.docker.io/v2/ratelimitpreview/test/manifests/latest | grep ratelimit
       COMMAND
 
       nx.collect_final_telemetry
@@ -629,8 +614,8 @@ RSpec.describe Prog::Vm::GithubRunner do
     it "Logs only docker limits if workflow_job is successful" do
       expect(github_runner).to receive(:workflow_job).and_return({"conclusion" => "success"})
       expect(sshable).to receive(:cmd).with(<<~COMMAND, log: false).and_return("ratelimit-limit: 100;w=21600\nratelimit-remaining: 98;w=21600\ndocker-ratelimit-source: 192.168.1.1\n")
-        TOKEN=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:ratelimitpreview/test:pull" | jq -r .token)
-        curl -s --head -H "Authorization: Bearer $TOKEN" https://registry-1.docker.io/v2/ratelimitpreview/test/manifests/latest | grep ratelimit
+        TOKEN=$(curl -m 10 -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:ratelimitpreview/test:pull" | jq -r .token)
+        curl -m 10 -s --head -H "Authorization: Bearer $TOKEN" https://registry-1.docker.io/v2/ratelimitpreview/test/manifests/latest | grep ratelimit
       COMMAND
       expect(Clog).to receive(:emit).with("Remaining DockerHub rate limits") do |&blk|
         expect(blk.call).to eq(dockerhub_rate_limits: {limit: 100, limit_window: 21600, remaining: 98, remaining_window: 21600, source: "192.168.1.1"})
