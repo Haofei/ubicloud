@@ -123,7 +123,7 @@ PGHOST=/var/run/postgresql
   it "returns list of backups" do
     expect(postgres_timeline).to receive(:blob_storage).and_return(instance_double(MinioCluster, url: "https://blob-endpoint", root_certs: "certs")).at_least(:once)
 
-    minio_client = Minio::Client.new(endpoint: "https://blob-endpoint", access_key: "access_key", secret_key: "secret_key", ssl_ca_file_data: "data")
+    minio_client = Minio::Client.new(endpoint: "https://blob-endpoint", access_key: "access_key", secret_key: "secret_key", ssl_ca_data: "data")
     expect(minio_client).to receive(:list_objects).with(postgres_timeline.ubid, "basebackups_005/").and_return([instance_double(Minio::Client::Blob, key: "backup_stop_sentinel.json"), instance_double(Minio::Client::Blob, key: "unrelated_file.txt")])
     expect(Minio::Client).to receive(:new).and_return(minio_client)
 
@@ -147,5 +147,10 @@ PGHOST=/var/run/postgresql
     policy = {Version: "2012-10-17", Statement: [{Effect: "Allow", Action: ["s3:*"], Resource: ["arn:aws:s3:::dummy-ubid*"]}]}
     expect(postgres_timeline).to receive(:ubid).and_return("dummy-ubid")
     expect(postgres_timeline.blob_storage_policy).to eq(policy)
+  end
+
+  it "returns earliest restore time" do
+    expect(postgres_timeline).to receive(:backups).and_return([instance_double(Minio::Client::Blob, last_modified: Time.now - 60 * 60 * 24 * 5)])
+    expect(postgres_timeline.earliest_restore_time.to_i).to be_within(5 * 60).of(Time.now.to_i - 60 * 60 * 24 * 5 + 5 * 60)
   end
 end

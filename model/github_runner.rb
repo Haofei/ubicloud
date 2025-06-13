@@ -9,7 +9,7 @@ class GithubRunner < Sequel::Model
   many_to_one :repository, key: :repository_id, class: :GithubRepository
   one_to_one :vm, key: :id, primary_key: :vm_id
 
-  plugin ResourceMethods
+  plugin ResourceMethods, redacted_columns: :workflow_job
   include SemaphoreMethods
   include HealthMonitorMethods
   semaphore :destroy, :skip_deregistration
@@ -19,7 +19,7 @@ class GithubRunner < Sequel::Model
       left_join(:strand, id: :id)
         .exclude(Sequel[:strand][:label] => ["start", "wait_concurrency_limit"])
         .select_map(Sequel[:github_runner][:label])
-        .sum { Github.runner_labels[it]["vm_size_data"].vcpus }
+        .sum { Github.runner_labels[it]["vcpus"] }
     end
   end
 
@@ -74,10 +74,6 @@ class GithubRunner < Sequel::Model
       "down"
     end
     aggregate_readings(previous_pulse: previous_pulse, reading: reading, data: {available_memory: available_memory})
-  end
-
-  def self.redacted_columns
-    super + [:workflow_job]
   end
 end
 
