@@ -60,13 +60,13 @@ end
     fail Nap.new(seconds)
   end
 
-  def pop(*args)
+  def pop(arg)
     outval = Sequel.pg_jsonb_wrap(
-      case args
-      in [String => s]
-        {"msg" => s}
-      in [Hash => h]
-        h
+      case arg
+      when String
+        {"msg" => arg}
+      when Hash
+        arg
       else
         fail "BUG: must pop with string or hash"
       end
@@ -181,7 +181,7 @@ end
   end
 
   def donate
-    strand.children.map(&:run)
+    strand.children_dataset.each(&:run)
     nap 1
   end
 

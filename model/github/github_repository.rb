@@ -37,12 +37,12 @@ class GithubRepository < Sequel::Model
     @admin_client ||= s3_client(Config.github_cache_blob_storage_access_key, Config.github_cache_blob_storage_secret_key)
   end
 
-  def after_destroy
-    super
-    destroy_blob_storage if access_key
-  end
-
   def destroy_blob_storage
+    # Abort any ongoing multipart uploads to ensure the bucket is empty before deleting it
+    blob_storage_client.list_multipart_uploads(bucket: bucket_name).uploads.each do
+      blob_storage_client.abort_multipart_upload(bucket: bucket_name, key: it.key, upload_id: it.upload_id)
+    end
+
     begin
       admin_client.delete_bucket(bucket: bucket_name)
     rescue Aws::S3::Errors::NoSuchBucket

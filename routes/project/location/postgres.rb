@@ -22,66 +22,96 @@ class Clover
       pg = @project.postgres_resources_dataset.first(filter)
       check_found_object(pg)
 
-      r.get true do
+      r.is do
+        r.get do
+          authorize("Postgres:view", pg.id)
+          response.headers["cache-control"] = "no-store"
+
+          if api?
+            Serializers::Postgres.serialize(pg, {detailed: true})
+          else
+            r.redirect "#{@project.path}#{pg.path}/overview"
+          end
+        end
+
+        r.delete do
+          authorize("Postgres:delete", pg.id)
+          DB.transaction do
+            pg.incr_destroy
+            audit_log(pg, "destroy")
+          end
+          204
+        end
+
+        r.patch do
+          authorize("Postgres:edit", pg.id)
+
+          size = typecast_params.nonempty_str("size", pg.target_vm_size)
+          target_storage_size_gib = typecast_params.pos_int("storage_size", pg.target_storage_size_gib)
+          ha_type = typecast_params.nonempty_str("ha_type", pg.ha_type)
+
+          postgres_params = {
+            "flavor" => pg.flavor,
+            "location" => pg.location,
+            "family" => size.split("-").first,
+            "size" => size,
+            "storage_size" => target_storage_size_gib.to_s,
+            "ha_type" => ha_type,
+            "version" => pg.version
+          }
+
+          validate_postgres_input(pg.name, postgres_params)
+
+          if pg.representative_server.nil? || target_storage_size_gib < pg.representative_server.storage_size_gib
+            begin
+              current_disk_usage = pg.representative_server.vm.sshable.cmd("df --output=used /dev/vdb | tail -n 1").strip.to_i / (1024 * 1024)
+            rescue
+              fail CloverError.new(400, "InvalidRequest", "Database is not ready for update", {})
+            end
+
+            if target_storage_size_gib * 0.8 < current_disk_usage
+              fail Validation::ValidationFailed.new({storage_size: "Insufficient storage size is requested. It is only possible to reduce the storage size if the current usage is less than 80% of the requested size."})
+            end
+          end
+
+          current_parsed_size = Option::POSTGRES_SIZE_OPTIONS[pg.target_vm_size]
+          current_postgres_vcpu_count = pg.target_server_count * current_parsed_size.vcpu_count
+
+          requested_parsed_size = Option::POSTGRES_SIZE_OPTIONS[postgres_params["size"]]
+          requested_standby_count = Option::POSTGRES_HA_OPTIONS[postgres_params["ha_type"]].standby_count
+          requested_postgres_vcpu_count = (requested_standby_count + 1) * requested_parsed_size.vcpu_count
+
+          Validation.validate_vcpu_quota(@project, "PostgresVCpu", requested_postgres_vcpu_count - current_postgres_vcpu_count)
+
+          DB.transaction do
+            pg.update(target_vm_size: requested_parsed_size.name, target_storage_size_gib:, ha_type:)
+            pg.read_replicas.map { it.update(target_vm_size: requested_parsed_size.name, target_storage_size_gib:) }
+            audit_log(pg, "update")
+          end
+
+          if api?
+            Serializers::Postgres.serialize(pg, {detailed: true})
+          else
+            flash["notice"] = "'#{pg.name}' will be updated according to requested configuration"
+            response["location"] = "#{@project.path}#{pg.path}"
+            200
+          end
+        end
+      end
+
+      r.get web?, %w[overview connection charts networking resize high-availability read-replica backup-restore settings] do |page|
         authorize("Postgres:view", pg.id)
+
+        next if pg.read_replica? && %w[resize high-availability read-replica backup-restore].include?(page)
+
         response.headers["cache-control"] = "no-store"
 
-        if api?
-          Serializers::Postgres.serialize(pg, {detailed: true})
-        else
-          @pg = Serializers::Postgres.serialize(pg, {detailed: true, include_path: true})
-          @family = Validation.validate_vm_size(pg.target_vm_size, "x64").family
-          @option_tree, @option_parents = generate_postgres_configure_options(flavor: @pg[:flavor], location: @location)
-          view "postgres/show"
-        end
-      end
+        @pg = pg
+        @family = Validation.validate_vm_size(pg.target_vm_size, "x64").family
+        @option_tree, @option_parents = generate_postgres_options(flavor: @pg.flavor, location: @location)
+        @page = page
 
-      r.delete true do
-        authorize("Postgres:delete", pg.id)
-        DB.transaction do
-          pg.incr_destroy
-          audit_log(pg, "destroy")
-        end
-        204
-      end
-
-      r.patch true do
-        authorize("Postgres:edit", pg.id)
-
-        target_vm_size = Validation.validate_postgres_size(pg.location, typecast_params.str("size") || pg.target_vm_size, @project.id)
-        target_storage_size_gib = Validation.validate_postgres_storage_size(pg.location, target_vm_size.vm_size, typecast_params.pos_int("storage_size") || pg.target_storage_size_gib, @project.id)
-        ha_type = typecast_params.str("ha_type") || pg.ha_type
-        Validation.validate_postgres_ha_type(ha_type)
-
-        if pg.representative_server.nil? || target_storage_size_gib < pg.representative_server.storage_size_gib
-          begin
-            current_disk_usage = pg.representative_server.vm.sshable.cmd("df --output=used /dev/vdb | tail -n 1").strip.to_i / (1024 * 1024)
-          rescue
-            fail CloverError.new(400, "InvalidRequest", "Database is not ready for update", {})
-          end
-
-          if target_storage_size_gib * 0.8 < current_disk_usage
-            fail Validation::ValidationFailed.new({storage_size: "Insufficient storage size is requested. It is only possible to reduce the storage size if the current usage is less than 80% of the requested size."})
-          end
-        end
-
-        current_postgres_vcpu_count = (PostgresResource::TARGET_STANDBY_COUNT_MAP[pg.ha_type] + 1) * pg.representative_server.vm.vcpus
-        requested_postgres_vcpu_count = (PostgresResource::TARGET_STANDBY_COUNT_MAP[ha_type] + 1) * target_vm_size.vcpu
-        Validation.validate_vcpu_quota(@project, "PostgresVCpu", requested_postgres_vcpu_count - current_postgres_vcpu_count)
-
-        DB.transaction do
-          pg.update(target_vm_size: target_vm_size.vm_size, target_storage_size_gib:, ha_type:)
-          pg.read_replicas.map { it.update(target_vm_size: target_vm_size.vm_size, target_storage_size_gib:) }
-          audit_log(pg, "update")
-        end
-
-        if api?
-          Serializers::Postgres.serialize(pg, {detailed: true})
-        else
-          flash["notice"] = "'#{pg.name}' will be updated according to requested configuration"
-          response["location"] = "#{@project.path}#{pg.path}"
-          200
-        end
+        view "postgres/show"
       end
 
       r.post "restart" do
@@ -98,40 +128,42 @@ class Clover
           Serializers::Postgres.serialize(pg, {detailed: true})
         else
           flash["notice"] = "'#{pg.name}' will be restarted in a few seconds"
-          r.redirect "#{@project.path}#{pg.path}"
+          r.redirect "#{@project.path}#{pg.path}/settings"
         end
       end
 
       r.on "firewall-rule" do
-        r.get api?, true do
-          authorize("Postgres:view", pg.id)
-          {
-            items: Serializers::PostgresFirewallRule.serialize(pg.firewall_rules),
-            count: pg.firewall_rules.count
-          }
-        end
-
-        r.post true do
-          authorize("Postgres:edit", pg.id)
-
-          parsed_cidr = Validation.validate_cidr(typecast_params.nonempty_str!("cidr"))
-
-          firewall_rule = nil
-          DB.transaction do
-            pg.incr_update_firewall_rules
-            firewall_rule = PostgresFirewallRule.create_with_id(
-              postgres_resource_id: pg.id,
-              cidr: parsed_cidr.to_s,
-              description: typecast_params.str("description")&.strip
-            )
-            audit_log(firewall_rule, "create", pg)
+        r.is do
+          r.get api? do
+            authorize("Postgres:view", pg.id)
+            {
+              items: Serializers::PostgresFirewallRule.serialize(pg.firewall_rules),
+              count: pg.firewall_rules.count
+            }
           end
 
-          if api?
-            Serializers::PostgresFirewallRule.serialize(firewall_rule)
-          else
-            flash["notice"] = "Firewall rule is created"
-            r.redirect "#{@project.path}#{pg.path}"
+          r.post do
+            authorize("Postgres:edit", pg.id)
+
+            parsed_cidr = Validation.validate_cidr(typecast_params.nonempty_str!("cidr"))
+
+            firewall_rule = nil
+            DB.transaction do
+              pg.incr_update_firewall_rules
+              firewall_rule = PostgresFirewallRule.create_with_id(
+                postgres_resource_id: pg.id,
+                cidr: parsed_cidr.to_s,
+                description: typecast_params.str("description")&.strip
+              )
+              audit_log(firewall_rule, "create", pg)
+            end
+
+            if api?
+              Serializers::PostgresFirewallRule.serialize(firewall_rule)
+            else
+              flash["notice"] = "Firewall rule is created"
+              r.redirect "#{@project.path}#{pg.path}/networking"
+            end
           end
         end
 
@@ -186,7 +218,7 @@ class Clover
 
           DB.transaction do
             md = PostgresMetricDestination.create(postgres_resource_id: pg.id, url:, username:, password:)
-            pg.servers.each(&:incr_configure_prometheus)
+            pg.servers.each(&:incr_configure_metrics)
             audit_log(md, "create", pg)
           end
 
@@ -194,7 +226,7 @@ class Clover
             Serializers::Postgres.serialize(pg, {detailed: true})
           else
             flash["notice"] = "Metric destination is created"
-            r.redirect "#{@project.path}#{pg.path}"
+            r.redirect "#{@project.path}#{pg.path}/charts"
           end
         end
 
@@ -204,7 +236,7 @@ class Clover
           if (md = pg.metric_destinations_dataset[id:])
             DB.transaction do
               md.destroy
-              pg.servers.each(&:incr_configure_prometheus)
+              pg.servers.each(&:incr_configure_metrics)
               audit_log(md, "destroy")
             end
           end
@@ -213,35 +245,33 @@ class Clover
         end
       end
 
-      r.on "read-replica" do
-        r.post true do
-          authorize("Postgres:edit", pg.id)
+      r.post "read-replica" do
+        authorize("Postgres:edit", pg.id)
 
-          name = typecast_params.nonempty_str!("name")
-          st = nil
-          DB.transaction do
-            st = Prog::Postgres::PostgresResourceNexus.assemble(
-              project_id: @project.id,
-              location_id: pg.location_id,
-              name:,
-              target_vm_size: pg.target_vm_size,
-              target_storage_size_gib: pg.target_storage_size_gib,
-              ha_type: PostgresResource::HaType::NONE,
-              version: pg.version,
-              flavor: pg.flavor,
-              parent_id: pg.id,
-              restore_target: nil
-            )
-            audit_log(pg, "create_replica", st.subject)
-          end
-          send_notification_mail_to_partners(st.subject, current_account.email)
+        name = typecast_params.nonempty_str!("name")
+        st = nil
+        DB.transaction do
+          st = Prog::Postgres::PostgresResourceNexus.assemble(
+            project_id: @project.id,
+            location_id: pg.location_id,
+            name:,
+            target_vm_size: pg.target_vm_size,
+            target_storage_size_gib: pg.target_storage_size_gib,
+            ha_type: PostgresResource::HaType::NONE,
+            version: pg.version,
+            flavor: pg.flavor,
+            parent_id: pg.id,
+            restore_target: nil
+          )
+          audit_log(pg, "create_replica", st.subject)
+        end
+        send_notification_mail_to_partners(st.subject, current_account.email)
 
-          if api?
-            Serializers::Postgres.serialize(st.subject, {detailed: true})
-          else
-            flash["notice"] = "'#{name}' will be ready in a few minutes"
-            r.redirect "#{@project.path}#{st.subject.path}"
-          end
+        if api?
+          Serializers::Postgres.serialize(st.subject, {detailed: true})
+        else
+          flash["notice"] = "'#{name}' will be ready in a few minutes"
+          r.redirect "#{@project.path}#{st.subject.path}/overview"
         end
       end
 
@@ -267,7 +297,7 @@ class Clover
           Serializers::Postgres.serialize(pg)
         else
           flash["notice"] = "'#{pg.name}' will be promoted in a few minutes, please refresh the page"
-          r.redirect "#{@project.path}#{pg.path}"
+          r.redirect "#{@project.path}#{pg.path}/settings"
         end
       end
 
@@ -298,20 +328,15 @@ class Clover
           Serializers::Postgres.serialize(st.subject, {detailed: true})
         else
           flash["notice"] = "'#{name}' will be ready in a few minutes"
-          r.redirect "#{@project.path}#{st.subject.path}"
+          r.redirect "#{@project.path}#{st.subject.path}/overview"
         end
       end
 
       r.post "reset-superuser-password" do
         authorize("Postgres:view", pg.id)
 
-        unless pg.representative_server.primary?
-          if api?
-            fail CloverError.new(400, "InvalidRequest", "Superuser password cannot be updated during restore!")
-          else
-            flash["error"] = "Superuser password cannot be updated during restore!"
-            redirect_back_with_inputs
-          end
+        if pg.read_replica?
+          raise CloverError.new(400, "InvalidRequest", "Superuser password cannot be updated for read replicas!")
         end
 
         password = typecast_params.str!("password")
@@ -328,7 +353,7 @@ class Clover
           Serializers::Postgres.serialize(pg, {detailed: true})
         else
           flash["notice"] = "The superuser password will be updated in a few seconds"
-          r.redirect "#{@project.path}#{pg.path}"
+          r.redirect "#{@project.path}#{pg.path}/settings"
         end
       end
 
@@ -345,7 +370,7 @@ class Clover
           Serializers::Postgres.serialize(pg, {detailed: true})
         else
           flash["notice"] = "Maintenance window is set"
-          r.redirect "#{@project.path}#{pg.path}"
+          r.redirect "#{@project.path}#{pg.path}/settings"
         end
       end
 

@@ -89,6 +89,7 @@ RSpec.describe Clover, "postgres" do
       it "success" do
         post "/project/#{project.ubid}/location/eu-central-h1/postgres/test-postgres-no-ha", {
           size: "standard-2",
+          storage_size: "64",
           ha_type: "none"
         }.to_json
 
@@ -97,6 +98,7 @@ RSpec.describe Clover, "postgres" do
 
         post "/project/#{project.ubid}/location/eu-central-h1/postgres/test-postgres-async", {
           size: "standard-2",
+          storage_size: "64",
           ha_type: "async"
         }.to_json
 
@@ -105,6 +107,7 @@ RSpec.describe Clover, "postgres" do
 
         post "/project/#{project.ubid}/location/eu-central-h1/postgres/test-postgres-sync", {
           size: "standard-2",
+          storage_size: "64",
           ha_type: "sync"
         }.to_json
 
@@ -118,6 +121,7 @@ RSpec.describe Clover, "postgres" do
 
         post "/project/#{project.ubid}/location/eu-central-h1/postgres/test-postgres-no-ha", {
           size: "standard-2",
+          storage_size: "64",
           flavor: "paradedb"
         }.to_json
 
@@ -128,6 +132,7 @@ RSpec.describe Clover, "postgres" do
         project.set_ff_postgres_lantern(false)
         post "/project/#{project.ubid}/location/eu-central-h1/postgres/test-postgres-lantern", {
           size: "standard-2",
+          storage_size: "64",
           flavor: "lantern"
         }.to_json
         expect(last_response.status).to eq(400)
@@ -136,15 +141,17 @@ RSpec.describe Clover, "postgres" do
       it "invalid location" do
         post "/project/#{project.ubid}/location/eu-north-h1/postgres/test-postgres", {
           size: "standard-2",
+          storage_size: "64",
           ha_type: "sync"
         }.to_json
 
-        expect(last_response).to have_api_error(400, "Validation failed for following fields: location", {"location" => "Given location is not a valid postgres location. Available locations: [\"eu-central-h1\", \"us-east-a2\"]"})
+        expect(last_response).to have_api_error(400, "Validation failed for following fields: location", {"location" => "Invalid location. Available options: eu-central-h1, us-east-a2"})
       end
 
       it "location not exist" do
         post "/project/#{project.ubid}/location/not-exist-location/postgres/test-postgres", {
           size: "standard-2",
+          storage_size: "64",
           ha_type: "sync"
         }.to_json
 
@@ -326,13 +333,13 @@ RSpec.describe Clover, "postgres" do
       end
 
       it "reset password invalid restore" do
-        pg.representative_server.update(timeline_access: "fetch")
+        pg.update(parent_id: "cde85384-4cf1-8ad0-aeb0-639f2ad94870")
 
         post "/project/#{project.ubid}/location/#{pg.display_location}/postgres/#{pg.name}/reset-superuser-password", {
           password: "DummyPassword123"
         }.to_json
 
-        expect(last_response).to have_api_error(400, "Superuser password cannot be updated during restore!")
+        expect(last_response).to have_api_error(400, "Superuser password cannot be updated for read replicas!")
       end
 
       it "invalid password" do
@@ -384,6 +391,7 @@ RSpec.describe Clover, "postgres" do
 
         post "/project/#{project.ubid}/location/#{TEST_LOCATION}/postgres/test-postgres", {
           size: "standard-2",
+          storage_size: "64",
           ha_type: "sync"
         }.to_json
 

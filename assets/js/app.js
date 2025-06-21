@@ -179,20 +179,8 @@ $(".copyable-content").on("click", ".copy-button", function (event) {
   }
 })
 
-$(".revealable-content").on("click", ".reveal-button", function (event) {
-  $(this).closest(".shadow-content").hide();
-  $(this).closest(".shadow-content").siblings(".revealed-content").show();
-
-  // For some reason, adding this style directly to the element does not trigger
-  // layout reflow for handling overflow when it is made visible. However, adding
-  // the overflow-wrap dynamically makes the browser recalculate the layout and
-  // apply the style correctly.
-  $(this).closest(".shadow-content").siblings(".revealed-content").css("overflow-wrap", "anywhere");
-})
-
-$(".revealable-content").on("click", ".hide-button", function (event) {
-  $(this).closest(".revealed-content").hide();
-  $(this).closest(".revealed-content").siblings(".shadow-content").show();
+$(".revealable-button").on("click", function () {
+  $(this).closest(".revealable-content").toggleClass("active");
 })
 
 $(".back-btn").on("click", function (event) {
@@ -257,6 +245,28 @@ function setupDatePicker() {
     $(this).flatpickr(options);
   });
 }
+
+$(".fork-icon").on("click", function () {
+  let target_datetime = $(this).data("target-datetime");
+  date_picker = flatpickr("#restore_target", {enableTime: true, dateFormat: "Y-m-d H:i"})
+  date_picker.setDate(target_datetime, true);
+
+  $("#restore_target").addClass("animate-flash transition-colors duration-1000");
+  setTimeout(() => {
+    $("#restore_target").removeClass('animate-flash');
+  }, 2000);
+})
+
+$(".connection-info-format-selector select, .connection-info-format-selector input").on('change', function() {
+  let format = $(".connection-info-format-selector select").val();
+  let port = $(".connection-info-format-selector input").is(":checked") ? "6432" : "5432";
+  let reveal_status = $(".connection-info-box:visible").find(".group").hasClass('active')
+
+  $(".connection-info-box").hide();
+  $(".connection-info-box-" + format + "-" + port).find(".group").toggleClass('active', reveal_status);
+  $(".connection-info-box-" + format + "-" + port).show();
+});
+
 
 function setupFormOptionUpdates() {
   $('#creation-form').on('change', 'input', function () {
@@ -332,6 +342,9 @@ function setupPlayground() {
     return;
   }
 
+  const previous_messages = [];
+  const previous_message_containers = [];
+
   // Initialize the model selector based on the location hash.
   const hash = window.location.hash.slice(1);
   if (hash !== '') {
@@ -344,31 +357,26 @@ function setupPlayground() {
     }
   }
 
-  function show_tab(name) {
-    $(".inference-tab").removeClass("active");
-    $(".inference-response").hide();
-    $(`#inference_tab_${name}`).show().parent().addClass("active");
-    $(`#inference_response_${name}`).show().removeClass("max-h-96");
-  }
-
-  $(".inference-tab").on("click", function (event) {
-    show_tab($(this).data("target"));
-  });
-
   // Disable the file input if the selected model is not multimodal.
   function update_file_input_state() {
     const selected_option = $('#inference_endpoint option:selected');
     const tags = JSON.parse(selected_option.attr('data-tags') || '{}');
     const is_multimodal = tags['multimodal'] || false;
-    $('#files').prop('disabled', !is_multimodal);
+    $('#inference_files').prop('disabled', !is_multimodal);
   }
   update_file_input_state();
   $('#inference_endpoint').on('change', update_file_input_state);
 
-  $('#inference_tab_preview').hide();
+  $("#inference_new_chat").click(() => {
+    for (const container of previous_message_containers) {
+      container.remove();
+    }
+    previous_messages.splice(0);
+    previous_message_containers.splice(0);
+    $("#inference_previous_empty").show();
+  });
 
-  let controller = null;
-
+  // Show reasoning in a different style.
   const reasoningExtension = {
     name: "reasoning",
     level: "block",
@@ -376,7 +384,7 @@ function setupPlayground() {
       text = text.trim().replace(/\n+/g, '<br>');
       if (text.length > 0) {
         return `
-          <div class="text-sm italic p-4 bg-gray-50 ">
+          <div class="text-sm italic p-4 bg-gray-50 mb-2">
             <div class="font-bold mb-4">Reasoning</div>
             ${text}
           </div>`;
@@ -410,7 +418,6 @@ function setupPlayground() {
       reader.readAsDataURL(file);
     });
   }
-
   async function readFilesFromInput(input) {
     if (input.disabled) {
       return [];
@@ -437,17 +444,62 @@ function setupPlayground() {
     return contents;
   }
 
+  function appendMessage(message, show_processing = false) {
+    const role = message.role;
+    const text = message.content[0].text;
+    const message_id = previous_messages.length;
+    // The `clipboard-document` and `check` icons from https://heroicons.com.
+    const COPY_ICON = '<path stroke-linecap="round" stroke-linejoin="round" d="M15.75 17.25v3.375c0 .621-.504 1.125-1.125 1.125h-9.75a1.125 1.125 0 0 1-1.125-1.125V7.875c0-.621.504-1.125 1.125-1.125H6.75a9.06 9.06 0 0 1 1.5.124m7.5 10.376h3.375c.621 0 1.125-.504 1.125-1.125V11.25c0-4.46-3.243-8.161-7.5-8.876a9.06 9.06 0 0 0-1.5-.124H9.375c-.621 0-1.125.504-1.125 1.125v3.5m7.5 10.375H9.375a1.125 1.125 0 0 1-1.125-1.125v-9.25m12 6.625v-1.875a3.375 3.375 0 0 0-3.375-3.375h-1.5a1.125 1.125 0 0 1-1.125-1.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H9.75"></path>';
+    const CHECK_ICON = '<path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" />';
+    const PROCESSING_STATUS = "<span class='mask-sweep'>Processing...</span>";
+    const num_files = message.content.length - 1;
+    const $new_message = $(`
+      <div class="mt-6 first:mt-2">
+        <div class="inline-flex items-baseline rounded-full px-2 text-xs font-semibold leading-5 bg-gray-200 text-gray-800">${role}</div>
+        <div id="inference_message_${message_id}" class="mt-2 text-sm ml-2">${text}</div>
+        <div class="text-sm ml-2 mt-1 text-gray-500">${num_files > 0 ? `Attached ${num_files} file(s).` : ""}</div>
+        <div id="inference_message_info_${message_id}" class="text-sm ml-2 mt-1 text-gray-500">${show_processing ? PROCESSING_STATUS : ""}</div>
+        <div class="flex mt-2 gap-1 ml-2 items-center">
+          <div id="copy_inference_message_${message_id}" class="group inline-block text-gray-400 hover:text-black cursor-pointer">
+            <svg id="inference_icon_${message_id}" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="h-4 w-4">
+              ${COPY_ICON}
+            </svg>
+          </div>
+        </div>
+      </div>
+    `);
+    $("#inference_previous_empty").hide();
+    $("#inference_previous").append($new_message);
+    previous_message_containers.push($new_message);
+    previous_messages.push(message);
+    let timeout = undefined;
+    $(`#copy_inference_message_${message_id}`).click(() => {
+      const content = previous_messages[message_id].content[0].text;
+      window.navigator.clipboard.writeText(content);
+      $(`#inference_icon_${message_id}`).html(CHECK_ICON);
+      clearTimeout(timeout);
+      timeout = setTimeout(() => {
+        $(`#inference_icon_${message_id}`).html(COPY_ICON);
+      }, 1000);
+    });
+  }
+
+  let controller = null;
   const generate = async () => {
     if (controller) {
       controller.abort();
       $('#inference_submit').text("Submit");
+      $('#inference_files').prop('disabled', false);
       controller = null;
       return;
     }
 
+    const system = $('#inference_system').val();
     const prompt = $('#inference_prompt').val();
     const endpoint = $('#inference_endpoint').val();
     const api_key = $('#inference_api_key').val();
+    const temperature = parseFloat($('#inference_temperature').val()) || 1.0;
+    const top_p = parseFloat($('#inference_top_p').val()) || 1.0;
 
     if (!prompt) {
       alert("Please enter a prompt.");
@@ -462,22 +514,32 @@ function setupPlayground() {
       return;
     }
 
+    const messages = [];
+    if (system.length > 0) {
+      messages.push({ role: "system", content: system });
+    }
+    messages.push(...previous_messages);
     let file_contents;
     try {
-      file_contents = await readFilesFromInput(document.getElementById('files'));
+      file_contents = await readFilesFromInput(document.getElementById('inference_files'));
     } catch (error) {
       alert(`Failed to read file(s): ${error.message || error}`);
       return;
     }
+    const user_message = {
+      role: "user", content: [
+        { type: "text", text: prompt },
+        ...file_contents,
+      ]
+    };
+    messages.push(user_message);
     const payload = JSON.stringify({
-      model: $('#inference_endpoint option:selected').text().trim(),
-      messages: [{
-        role: "user", content: [
-          { type: "text", text: prompt },
-          ...file_contents,
-        ]
-      }],
+      model: $("#inference_endpoint option:selected").text().trim(),
+      messages: messages,
       stream: true,
+      stream_options: { include_usage: true },
+      temperature: temperature,
+      top_p: top_p,
     });
 
     const MAX_PAYLOAD_MB = 50;
@@ -487,17 +549,26 @@ function setupPlayground() {
       return;
     }
 
-    $('#inference_response_raw').text("");
-    $('#inference_response_preview').text("");
-    $('#inference_submit').text("Stop");
-    show_tab("raw");
-    $('#inference_tab_preview').hide();
-    $('#inference_response_raw').addClass("max-h-96");
+    $("#inference_submit").text("Stop");
+    $("#inference_files").prop('disabled', true);
+    $("#inference_prompt").val("");
+    $("#inference_files").val("");
+    appendMessage(user_message);
+    appendMessage({
+      role: "assistant",
+      content: [
+        { type: "text", text: "" }, // Placeholder for the response content.
+      ]
+    }, show_processing = true);
+    const assistant_message_id = previous_messages.length - 1;
+    const assistant_message = previous_messages[assistant_message_id];
+    const $assistant_message_container = $(`#inference_message_${assistant_message_id}`);
 
     controller = new AbortController();
     const signal = controller.signal;
     let content = "";
-    let reasoning_content = ""
+    let reasoning_content = "";
+    let showing_processing = true;
 
     try {
       const response = await fetch(`${endpoint}/v1/chat/completions`, {
@@ -538,6 +609,11 @@ function setupPlayground() {
           .filter((x) => x !== null);
 
         parsedLines.forEach((parsedLine) => {
+          const prompt_tokens = parsedLine?.usage?.prompt_tokens;
+          const completion_tokens = parsedLine?.usage?.completion_tokens;
+          if (prompt_tokens !== undefined && completion_tokens !== undefined) {
+            $(`#inference_message_info_${assistant_message_id}`).text(`Usage: ${prompt_tokens} input tokens and ${completion_tokens} output tokens.`);
+          }
           const new_content = parsedLine?.choices?.[0]?.delta?.content;
           const new_reasoning_content = parsedLine?.choices?.[0]?.delta?.reasoning_content;
           if (!new_content && !new_reasoning_content) {
@@ -545,16 +621,25 @@ function setupPlayground() {
           }
           content += new_content || "";
           reasoning_content += new_reasoning_content || "";
-          const inference_response_raw = reasoning_content
-            ? `[reasoning_content]\n${reasoning_content}\n\n[content]\n${content}`
-            : content;
-          $('#inference_response_raw').text(inference_response_raw);
+          assistant_message.content[0].text = content;
+
+          // Scroll to the bottom of the page if the user is near the bottom.
+          const scrollTop = window.scrollY || document.documentElement.scrollTop;
+          if (document.documentElement.scrollHeight - (scrollTop + window.innerHeight) <= 1) {
+            requestAnimationFrame(() => {
+              window.scrollTo({ top: document.documentElement.scrollHeight });
+            });
+          }
+
+          const rendered_response = DOMPurify.sanitize(
+            reasoningExtension.format_reasoning(reasoning_content) + marked.parse(content));
+          $assistant_message_container.html(rendered_response);
+          if (showing_processing) {
+            $(`#inference_message_info_${assistant_message_id}`).text("");
+            showing_processing = false;
+          }
         });
       }
-      const inference_response_preview = DOMPurify.sanitize(
-        reasoningExtension.format_reasoning(reasoning_content) + marked.parse(content));
-      $('#inference_response_preview').html(inference_response_preview);
-      show_tab("preview");
     }
     catch (error) {
       let errorMessage;
@@ -567,14 +652,18 @@ function setupPlayground() {
         errorMessage = `An error occurred: ${error.message}`;
       }
 
-      $('#inference_response_raw').text(errorMessage);
+      $(`#inference_message_info_${assistant_message_id}`).text(errorMessage);
     } finally {
-      $('#inference_submit').text("Submit");
+      $("#inference_submit").text("Submit");
+      $("#inference_files").prop("disabled", false);
       controller = null;
     }
   };
 
   $('#inference_submit').on("click", generate);
+  $('#inference_config-show_advanced-0').on("change", function() {
+    $('#inference_config_advanced_settings').toggleClass("hidden", !$(this).is(":checked"));
+  });
 }
 
 function setupFormsWithPatchMethod() {
@@ -727,7 +816,7 @@ function queryAndUpdateChart(chartInstance, start_time, end_time) {
     end: end_time.toISOString()
   }
   const queryString = new URLSearchParams(params).toString();
-  const url = `${new URL(document.location.href).pathname}/metrics?${queryString}`;
+  const url = $("#metrics-container").data("metrics-url") + "/metrics?" + queryString;
 
   fetch(url)
     .then(response => response.json())
@@ -805,7 +894,7 @@ function queryAndUpdateChart(chartInstance, start_time, end_time) {
 }
 
 function updateMetricsCharts() {
-  const timeDuration = $('#metrics-container #time-range').val();
+  const timeDuration = $('#metrics-container #time-range').val() || "1h";
   const timeDurationSeconds = durationToSeconds(timeDuration);
   const start_time = new Date(Date.now() - timeDurationSeconds * 1000);
   const end_time = new Date(Date.now());

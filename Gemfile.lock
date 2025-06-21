@@ -8,14 +8,6 @@ GIT
       rodauth (~> 2.36)
 
 GIT
-  remote: https://github.com/jeremyevans/roda.git
-  revision: 0e8c8067c4b84b402d72b10168c925c79fdc8016
-  ref: 0e8c8067c4b84b402d72b10168c925c79fdc8016
-  specs:
-    roda (3.92.0)
-      rack
-
-GIT
   remote: https://github.com/ubicloud/erb-formatter.git
   revision: df3174476986706828f7baf3e5e6f5ec8ecd849b
   ref: df3174476986706828f7baf3e5e6f5ec8ecd849b
@@ -62,14 +54,18 @@ GEM
     awesome_print (1.9.2)
     aws-eventstream (1.3.2)
     aws-partitions (1.1067.0)
-    aws-sdk-core (3.220.1)
+    aws-sdk-core (3.225.0)
       aws-eventstream (~> 1, >= 1.3.0)
       aws-partitions (~> 1, >= 1.992.0)
       aws-sigv4 (~> 1.9)
       base64
       jmespath (~> 1, >= 1.6.1)
+      logger
     aws-sdk-ec2 (1.512.0)
       aws-sdk-core (~> 3, >= 3.216.0)
+      aws-sigv4 (~> 1.5)
+    aws-sdk-iam (1.123.0)
+      aws-sdk-core (~> 3, >= 3.225.0)
       aws-sigv4 (~> 1.5)
     aws-sdk-kms (1.99.0)
       aws-sdk-core (~> 3, >= 3.216.0)
@@ -280,7 +276,7 @@ GEM
     puma (6.5.0)
       nio4r (~> 2.0)
     racc (1.8.1)
-    rack (3.1.14)
+    rack (3.1.16)
     rack-protection (4.1.1)
       base64 (>= 0.1.0)
       logger (>= 1.6.0)
@@ -304,6 +300,8 @@ GEM
     reline (0.6.1)
       io-console (~> 0.5)
     rexml (3.4.1)
+    roda (3.93.0)
+      rack
     rodauth (2.39.0)
       roda (>= 2.6.0)
       sequel (>= 4)
@@ -456,6 +454,7 @@ DEPENDENCIES
   argon2-kdf
   awesome_print
   aws-sdk-ec2 (~> 1.512)
+  aws-sdk-iam
   aws-sdk-s3
   bcrypt_pbkdf
   brakeman
@@ -490,7 +489,7 @@ DEPENDENCIES
   rake
   refrigerator (>= 1)
   reline
-  roda!
+  roda (>= 3.93)
   rodauth (>= 2.39)
   rodauth-omniauth!
   rodish (>= 2)

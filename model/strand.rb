@@ -19,21 +19,48 @@ class Strand < Sequel::Model
   plugin ResourceMethods
 
   def subject
-    return @subject if defined?(@subject)
+    return @subject if defined?(@subject) && @subject != :reload
     @subject = UBID.decode(ubid)
   end
 
-  if Config.test?
-    private def verbose_logging
-      true
+  RespirateMetrics = Struct.new(:scheduled, :scan_picked_up, :worker_started, :lease_checked, :lease_acquired, :queue_size, :available_workers, :old_strand) do
+    def scan_delay
+      scan_picked_up - scheduled
     end
-    # :nocov:
-  else
-    private def verbose_logging
-      rand(1000) == 0
+
+    def queue_delay
+      worker_started - scan_picked_up
+    end
+
+    def lease_delay
+      lease_checked - worker_started
+    end
+
+    def total_delay
+      lease_checked - scheduled
     end
   end
-  # :nocov:
+
+  def respirate_metrics
+    @respirate_metrics ||= RespirateMetrics.new(scheduled: schedule)
+  end
+
+  def scan_picked_up!
+    respirate_metrics.scan_picked_up = Time.now
+  end
+
+  def worker_started!
+    respirate_metrics.worker_started = Time.now
+  end
+
+  def lease_checked!(affected)
+    respirate_metrics.lease_checked = Time.now
+    respirate_metrics.lease_acquired = true if affected
+  end
+
+  def old_strand!
+    respirate_metrics.old_strand = true
+  end
 
   def take_lease_and_reload
     unless (ps = DB.prepared_statement(:strand_take_lease_and_reload))
@@ -58,13 +85,14 @@ class Strand < Sequel::Model
           schedule: Sequel::CURRENT_TIMESTAMP + (ps_sch * Sequel.cast("1 second", :interval)))
     end
     affected = ps.call(id:)
+    lease_checked!(affected)
     return false unless affected
     lease_time = affected.fetch(:lease)
-    verbose_logging = self.verbose_logging
 
-    Clog.emit("obtained lease") { {lease_acquired: {time: lease_time, delay: Time.now - schedule}} } if verbose_logging
     # Also operate as reload query
-    @values = affected
+    _refresh_set_values(affected)
+    _clear_changed_columns(:refresh)
+    @subject = :reload
 
     begin
       yield
@@ -81,7 +109,6 @@ UPDATE strand
 SET lease = now() - '1000 years'::interval
 WHERE id = ? AND lease = ?
 SQL
-          Clog.emit("lease cleared") { {lease_cleared: {num_updated: num_updated}} } if verbose_logging
           unless num_updated == 1
             Clog.emit("lease violated data") do
               {lease_clear_debug_snapshot: lease_clear_debug_snapshot}
