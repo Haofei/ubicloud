@@ -87,8 +87,56 @@ class Clover
   def generate_vm_options
     options = OptionTreeGenerator.new
 
+    @show_gpu = if flash["old"]
+      case flash["old"]["show_gpu"]
+      when "true"
+        true
+      when "false"
+        false
+      end
+    else
+      typecast_params.bool("show_gpu")
+    end
+    @show_gpu = false unless @project.get_ff_gpu_vm
+    # @show_gpu:
+    # true: Only show options valid for GPU configurations
+    # false: Do not show GPU options
+    # nil: Show GPU options, but also show options not valid for GPU configurations
+
+    if @show_gpu != false
+      available_gpus = DB[:pci_device]
+        .join(:vm_host, id: :vm_host_id)
+        .join(:location, id: :location_id)
+        .where(device_class: ["0300", "0302"], vm_id: nil)
+        .group_and_count(:vm_host_id, :name, :device)
+        .from_self
+        .select_group { [name.as(:location_name), device] }
+        .select_append { max(:count).as(:max_count) }
+
+      gpu_counts = [1, 2, 4, 8]
+      gpu_options = available_gpus.map { it[:device] }.uniq.flat_map { |x| gpu_counts.map { |i| "#{i}:#{x}" } }
+      gpu_availability = available_gpus.each_with_object({}) do |entry, hash|
+        hash[entry[:location_name]] ||= {}
+        hash[entry[:location_name]][entry[:device]] = entry[:max_count]
+      end
+      gpu_locations = gpu_availability.keys
+
+      if @show_gpu
+        if gpu_locations.empty? && web?
+          flash["error"] = "Unfortunately, no virtual machines with GPUs are currently available."
+          request.redirect "#{@project.path}/vm/create"
+        end
+
+        location_family_check = lambda do |location, family|
+          !gpu_locations.include?(location.name) || family == "burstable"
+        end
+      end
+    end
+
     options.add_option(name: "name")
-    options.add_option(name: "location", values: Option.locations(feature_flags: @project.feature_flags))
+    options.add_option(name: "location", values: Option.locations(feature_flags: @project.feature_flags)) do |location|
+      !@show_gpu || gpu_locations.include?(location.name)
+    end
 
     subnets = dataset_authorize(@project.private_subnets_dataset, "PrivateSubnet:view").map {
       {
@@ -102,10 +150,13 @@ class Clover
     end
 
     options.add_option(name: "enable_ip4", values: ["1"], parent: "location")
+
     options.add_option(name: "family", values: Option.families.map(&:name), parent: "location") do |location, family|
+      next false if location_family_check&.call(location, family)
       !!BillingRate.from_resource_properties("VmVCpu", family, location.name)
     end
-    options.add_option(name: "size", values: Option::VmSizes.select { it.visible }.map { it.display_name }, parent: "family") do |location, family, size|
+
+    options.add_option(name: "size", values: Option::VmSizes.select(&:visible).map(&:display_name), parent: "family") do |location, family, size|
       vm_size = Option::VmSizes.find { it.display_name == size && it.arch == "x64" }
       vm_size.family == family
     end
@@ -115,20 +166,19 @@ class Clover
       vm_size.storage_size_options.include?(storage_size.to_i)
     end
 
-    available_gpus = DB.from(DB[:pci_device].join(:vm_host, id: :vm_host_id).join(:location, id: :location_id).where(device_class: ["0300", "0302"], vm_id: nil).group_and_count(:vm_host_id, :name, :device))
-      .select { [name.as(location_name), device, max(:count).as(:max_count)] }.group(:name, :device)
+    if @show_gpu != false
+      base_gpu_options = @show_gpu ? [] : ["0:"]
+      options.add_option(name: "gpu", values: base_gpu_options + gpu_options, parent: "family") do |location, family, gpu|
+        gpu_count, device = gpu.split(":", 2)
+        gpu_count = gpu_count.to_i
+        device_availability = gpu_availability.dig(location.name, device)
+        next true if gpu_count == 0
 
-    gpu_counts = [1, 2, 4, 8]
-    gpu_options = available_gpus.map { it[:device] }.uniq.flat_map { |x| gpu_counts.map { |i| "#{i}:#{x}" } }
-    gpu_availability = available_gpus.each_with_object({}) do |entry, hash|
-      hash[entry[:location_name]] ||= {}
-      hash[entry[:location_name]][entry[:device]] = entry[:max_count]
-    end
-
-    options.add_option(name: "gpu", values: ["0:"] + gpu_options, parent: "family") do |location, family, gpu|
-      gpu = gpu.split(":")
-      gpu_count = gpu[0].to_i
-      gpu_count == 0 || (family == "standard" && !!BillingRate.from_resource_properties("Gpu", gpu[1], location.name) && gpu_availability[location.name] && gpu_availability[location.name][gpu[1]] && gpu_availability[location.name][gpu[1]] >= gpu_count)
+        family == "standard" &&
+          !!BillingRate.from_resource_properties("Gpu", device, location.name) &&
+          device_availability &&
+          device_availability >= gpu_count
+      end
     end
 
     options.add_option(name: "boot_image", values: Option::BootImages.map(&:name))

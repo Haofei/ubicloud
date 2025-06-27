@@ -74,7 +74,10 @@ class Prog::Test::HetznerServer < Prog::Test::Base
   end
 
   label def wait_setup_host
-    nap 15 unless vm_host && vm_host.strand.label == "wait"
+    unless vm_host.strand.label == "wait"
+      Clog.emit(vm_host.sshable.cmd("ls -lah /var/storage/images").strip.tr("\n", "\t")) if vm_host.strand.label == "wait_download_boot_images"
+      nap 15
+    end
 
     if retval&.dig("msg") == "installed rhizome"
       verify_specs_installation(installed: true)
@@ -102,7 +105,16 @@ class Prog::Test::HetznerServer < Prog::Test::Base
     vm_host.sshable.cmd("sudo RUN_E2E_TESTS=1 SPDK_TESTS_TMP_DIR=#{tmp_dir} bundle exec rspec host/e2e")
     vm_host.sshable.cmd("sudo rm -rf #{tmp_dir}")
 
-    hop_wait
+    hop_install_vhost_backend
+  end
+
+  label def install_vhost_backend
+    hop_wait if retval&.dig("msg") == "VhostBlockBackend was setup"
+    push Prog::Storage::SetupVhostBlockBackend, {
+      "subject_id" => vm_host.id,
+      "version" => Config.vhost_block_backend_version,
+      "allocation_weight" => 100
+    }
   end
 
   label def wait

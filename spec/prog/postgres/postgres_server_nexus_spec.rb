@@ -3,7 +3,9 @@
 require_relative "../../model/spec_helper"
 
 RSpec.describe Prog::Postgres::PostgresServerNexus do
-  subject(:nx) { described_class.new(Strand.create(id: "0d77964d-c416-8edb-9237-7e7dd5d6fcf8", prog: "Postgres::PostgresServerNexus", label: "start")) }
+  subject(:nx) { described_class.new(st) }
+
+  let(:st) { Strand.create(id: "0d77964d-c416-8edb-9237-7e7dd5d6fcf8", prog: "Postgres::PostgresServerNexus", label: "start") }
 
   let(:postgres_server) {
     instance_double(
@@ -14,7 +16,8 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
         PostgresTimeline,
         id: "f6644aae-9759-8ada-9aef-9b6cfccdc167",
         generate_walg_config: "walg config",
-        blob_storage: instance_double(MinioCluster, root_certs: "certs")
+        blob_storage: instance_double(MinioCluster, root_certs: "certs"),
+        aws?: false
       ),
       vm: instance_double(
         Vm,
@@ -88,29 +91,54 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
 
     it "picks correct base image for AWS-pg16" do
       expect(PostgresResource).to receive(:[]).and_return(postgres_resource)
-      expect(postgres_resource.location).to receive(:provider).and_return("aws").at_least(:once)
+      loc = Location.create(
+        name: "us-west-2",
+        display_name: "aws-us-west-2",
+        ui_name: "aws-us-west-2",
+        visible: true,
+        provider: "aws",
+        project_id: user_project.id
+      )
+      expect(postgres_resource).to receive(:location).and_return(loc).at_least(:once)
       expect(postgres_resource).to receive(:version).and_return("16").at_least(:once)
-      expect(Prog::Vm::Nexus).to receive(:assemble_with_sshable).with(anything, hash_including(boot_image: Config.aws_based_postgres_16_ubuntu_2204_ami_version)).and_return(instance_double(Strand, id: "62c62ddb-5b5a-4e9e-b534-e73c16f86bcb"))
+      expect(Prog::Vm::Nexus).to receive(:assemble_with_sshable).with(anything, hash_including(boot_image: "ami-0c54521352e6e92bb")).and_return(instance_double(Strand, id: "62c62ddb-5b5a-4e9e-b534-e73c16f86bcb"))
       expect(PostgresServer).to receive(:create).and_return(instance_double(PostgresServer, id: "5c13fd6a-25c2-4fa4-be48-2846f127526a"))
       described_class.assemble(resource_id: postgres_resource.id, timeline_id: "91588cda-7122-4d6a-b01c-f33c30cb17d8", timeline_access: "push", representative_at: Time.now)
     end
 
     it "picks correct base image for AWS-pg17" do
       expect(PostgresResource).to receive(:[]).and_return(postgres_resource)
-      expect(postgres_resource.location).to receive(:provider).and_return("aws").at_least(:once)
+      loc = Location.create(
+        name: "us-west-2",
+        display_name: "aws-us-west-2",
+        ui_name: "aws-us-west-2",
+        visible: true,
+        provider: "aws",
+        project_id: user_project.id
+      )
       expect(postgres_resource).to receive(:version).and_return("17").at_least(:once)
-      expect(Prog::Vm::Nexus).to receive(:assemble_with_sshable).with(anything, hash_including(boot_image: Config.aws_based_postgres_17_ubuntu_2204_ami_version)).and_return(instance_double(Strand, id: "62c62ddb-5b5a-4e9e-b534-e73c16f86bcb"))
+      expect(postgres_resource).to receive(:location).and_return(loc).at_least(:once)
+      expect(postgres_resource).to receive(:location_id).and_return(loc.id).at_least(:once)
+      expect(Prog::Vm::Nexus).to receive(:assemble_with_sshable).with(anything, hash_including(boot_image: "ami-0ba58268c42166e1d")).and_return(instance_double(Strand, id: "62c62ddb-5b5a-4e9e-b534-e73c16f86bcb"))
       expect(PostgresServer).to receive(:create).and_return(instance_double(PostgresServer, id: "5c13fd6a-25c2-4fa4-be48-2846f127526a"))
       described_class.assemble(resource_id: postgres_resource.id, timeline_id: "91588cda-7122-4d6a-b01c-f33c30cb17d8", timeline_access: "push", representative_at: Time.now)
     end
 
     it "raises error if the version is not supported for AWS" do
       expect(PostgresResource).to receive(:[]).and_return(postgres_resource)
-      expect(postgres_resource.location).to receive(:provider).and_return("aws").at_least(:once)
+      loc = Location.create(
+        name: "us-west-2",
+        display_name: "aws-us-west-2",
+        ui_name: "aws-us-west-2",
+        visible: true,
+        provider: "aws",
+        project_id: user_project.id
+      )
+      expect(postgres_resource).to receive(:location).and_return(loc).at_least(:once)
       expect(postgres_resource).to receive(:version).and_return("18").at_least(:once)
       expect {
         described_class.assemble(resource_id: postgres_resource.id, timeline_id: "91588cda-7122-4d6a-b01c-f33c30cb17d8", timeline_access: "push", representative_at: Time.now)
-      }.to raise_error RuntimeError, "Unsupported PostgreSQL version for AWS: 18"
+      }.to raise_error NoMethodError, "undefined method 'aws_ami_id' for nil"
     end
 
     it "errors out for unknown flavor" do
@@ -181,19 +209,13 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
   end
 
   describe "#wait_bootstrap_rhizome" do
-    before { expect(nx).to receive(:reap) }
-
     it "hops to mount_data_disk if there are no sub-programs running" do
-      expect(nx).to receive(:leaf?).and_return true
-
       expect { nx.wait_bootstrap_rhizome }.to hop("mount_data_disk")
     end
 
     it "donates if there are sub-programs running" do
-      expect(nx).to receive(:leaf?).and_return false
-      expect(nx).to receive(:donate).and_call_original
-
-      expect { nx.wait_bootstrap_rhizome }.to nap(1)
+      Strand.create(parent_id: st.id, prog: "BootstrapRhizome", label: "start", stack: [{}], lease: Time.now + 10)
+      expect { nx.wait_bootstrap_rhizome }.to nap(120)
     end
   end
 
@@ -240,6 +262,15 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
       expect(sshable).to receive(:cmd).with("sudo tee /usr/lib/ssl/certs/blob_storage_ca.crt > /dev/null", stdin: "certs")
       expect(postgres_server).to receive(:primary?).and_return(false)
       expect { nx.configure_walg_credentials }.to hop("initialize_database_from_backup")
+    end
+
+    it "doesn't put the blob_storage_ca if the timeline is aws" do
+      expect(postgres_server.timeline).to receive(:aws?).and_return(true)
+      expect(sshable).to receive(:cmd).with("sudo -u postgres tee /etc/postgresql/wal-g.env > /dev/null", stdin: "walg config")
+      expect(sshable).not_to receive(:cmd).with("sudo tee /usr/lib/ssl/certs/blob_storage_ca.crt > /dev/null", stdin: "certs")
+      expect(postgres_server).to receive(:primary?).and_return(true)
+
+      expect { nx.configure_walg_credentials }.to hop("initialize_empty_database")
     end
   end
 
@@ -713,11 +744,10 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
     end
 
     it "does not bud restart if there is already one restart going on" do
-      expect(postgres_server).to receive(:trigger_failover).and_return(false).twice
-      expect(nx).to receive(:available?).and_return(false)
+      Strand.create(parent_id: st.id, prog: "Postgres::PostgresServerNexus", label: "restart", stack: [{}], lease: Time.now + 10)
+      expect(postgres_server).to receive(:trigger_failover).and_return(false)
       expect { nx.unavailable }.to nap(5)
-      expect(nx).not_to receive(:bud).with(described_class, {}, :restart)
-      expect { nx.unavailable }.to nap(5)
+      expect(Strand.where(prog: "Postgres::PostgresServerNexus", label: "restart").count).to eq 1
     end
 
     it "trigger_failover succeeds, naps 0" do

@@ -15,12 +15,8 @@ class Prog::Postgres::PostgresServerNexus < Prog::Base
       ubid = PostgresServer.generate_ubid
 
       postgres_resource = PostgresResource[resource_id]
-      boot_image = if postgres_resource.location.provider == "aws"
-        case postgres_resource.version
-        when "16" then Config.aws_based_postgres_16_ubuntu_2204_ami_version
-        when "17" then Config.aws_based_postgres_17_ubuntu_2204_ami_version
-        else raise "Unsupported PostgreSQL version for AWS: #{postgres_resource.version}"
-        end
+      boot_image = if postgres_resource.location.aws?
+        postgres_resource.location.pg_ami(postgres_resource.version)
       else
         flavor_suffix = case postgres_resource.flavor
         when PostgresResource::Flavor::STANDARD then ""
@@ -99,9 +95,7 @@ class Prog::Postgres::PostgresServerNexus < Prog::Base
   end
 
   label def wait_bootstrap_rhizome
-    reap
-    hop_mount_data_disk if leaf?
-    donate
+    reap(:mount_data_disk)
   end
 
   label def mount_data_disk
@@ -463,8 +457,8 @@ SQL
 
     nap 0 if postgres_server.trigger_failover
 
-    reap
-    nap 5 unless strand.children.select { it.prog == "Postgres::PostgresServerNexus" && it.label == "restart" }.empty?
+    reap(fallthrough: true)
+    nap 5 unless strand.children_dataset.where(prog: "Postgres::PostgresServerNexus", label: "restart").empty?
 
     if available?
       decr_checkup
@@ -532,7 +526,7 @@ SQL
 
     walg_config = postgres_server.timeline.generate_walg_config
     vm.sshable.cmd("sudo -u postgres tee /etc/postgresql/wal-g.env > /dev/null", stdin: walg_config)
-    vm.sshable.cmd("sudo tee /usr/lib/ssl/certs/blob_storage_ca.crt > /dev/null", stdin: postgres_server.timeline.blob_storage.root_certs)
+    vm.sshable.cmd("sudo tee /usr/lib/ssl/certs/blob_storage_ca.crt > /dev/null", stdin: postgres_server.timeline.blob_storage.root_certs) unless postgres_server.timeline.aws?
   end
 
   def available?

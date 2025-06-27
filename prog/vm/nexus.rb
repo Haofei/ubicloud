@@ -41,7 +41,6 @@ class Prog::Vm::Nexus < Prog::Base
     storage_volumes.each_with_index do |volume, disk_index|
       volume[:size_gib] ||= vm_size.storage_size_options.first
       volume[:skip_sync] ||= false
-      volume[:max_ios_per_sec] ||= vm_size.io_limits.max_ios_per_sec
       volume[:max_read_mbytes_per_sec] ||= vm_size.io_limits.max_read_mbytes_per_sec
       volume[:max_write_mbytes_per_sec] ||= vm_size.io_limits.max_write_mbytes_per_sec
       volume[:encrypted] = true if !volume.has_key? :encrypted
@@ -194,9 +193,7 @@ class Prog::Vm::Nexus < Prog::Base
   end
 
   label def wait_aws_vm_started
-    reap
-    hop_wait_sshable if leaf?
-    nap 10
+    reap(:wait_sshable, nap: 10)
   end
 
   label def start
@@ -554,12 +551,10 @@ class Prog::Vm::Nexus < Prog::Base
   end
 
   label def wait_aws_vm_destroyed
-    reap
-    if leaf?
+    reap(nap: 10) do
       final_clean_up
       pop "vm deleted"
     end
-    nap 10
   end
 
   label def wait_lb_expiry

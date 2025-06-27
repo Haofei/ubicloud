@@ -13,22 +13,24 @@ class Clover
         filter[:location_id] = @location.id
         kc = @project.kubernetes_clusters_dataset.first(filter)
 
-        next 404 unless kc
+        check_found_object(kc)
 
-        r.get true do
-          authorize("KubernetesCluster:view", kc.id)
+        r.is do
+          r.get do
+            authorize("KubernetesCluster:view", kc.id)
 
-          @kc = kc
-          view "kubernetes-cluster/show"
-        end
-
-        r.delete true do
-          authorize("KubernetesCluster:delete", kc.id)
-          DB.transaction do
-            kc.incr_destroy
-            audit_log(kc, "destroy")
+            @kc = kc
+            view "kubernetes-cluster/show"
           end
-          204
+
+          r.delete do
+            authorize("KubernetesCluster:delete", kc.id)
+            DB.transaction do
+              kc.incr_destroy
+              audit_log(kc, "destroy")
+            end
+            204
+          end
         end
 
         r.get "kubeconfig" do
