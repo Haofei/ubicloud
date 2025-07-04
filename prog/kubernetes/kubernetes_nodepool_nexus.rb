@@ -28,39 +28,9 @@ class Prog::Kubernetes::KubernetesNodepoolNexus < Prog::Base
   label def start
     register_deadline("wait", 120 * 60)
     when_start_bootstrapping_set? do
-      hop_create_services_load_balancer
+      hop_bootstrap_worker_vms
     end
     nap 10
-  end
-
-  label def create_services_load_balancer
-    hop_bootstrap_worker_vms if LoadBalancer[name: kubernetes_nodepool.cluster.services_load_balancer_name]
-
-    dns_zone = DnsZone[name: Config.kubernetes_service_hostname]
-
-    custom_hostname_prefix = if dns_zone
-      "#{kubernetes_nodepool.cluster.ubid.to_s[-10...]}-services"
-    end
-
-    lb = Prog::Vnet::LoadBalancerNexus.assemble(
-      kubernetes_nodepool.cluster.private_subnet_id,
-      name: kubernetes_nodepool.cluster.services_load_balancer_name,
-      algorithm: "hash_based",
-      # TODO: change the api to support LBs without ports
-      # The next two fields will be later modified by the sync_kubernetes_services label
-      # These are just set for passing the creation validations
-      src_port: 443,
-      dst_port: 6443,
-      health_check_endpoint: "/",
-      health_check_protocol: "tcp",
-      custom_hostname_dns_zone_id: dns_zone&.id,
-      custom_hostname_prefix:,
-      stack: LoadBalancer::Stack::IPV4
-    ).subject
-
-    lb.dns_zone&.insert_record(record_name: "*.#{lb.hostname}.", type: "CNAME", ttl: 3600, data: "#{lb.hostname}.")
-
-    hop_bootstrap_worker_vms
   end
 
   label def bootstrap_worker_vms
@@ -71,9 +41,7 @@ class Prog::Kubernetes::KubernetesNodepoolNexus < Prog::Base
   end
 
   label def wait_worker_node
-    reap
-    hop_wait if leaf?
-    donate
+    reap(:wait)
   end
 
   label def wait
@@ -102,22 +70,17 @@ class Prog::Kubernetes::KubernetesNodepoolNexus < Prog::Base
   end
 
   label def wait_upgrade
-    reap
-    hop_upgrade if leaf?
-    donate
+    reap(:upgrade)
   end
 
   label def destroy
-    reap
-    donate unless leaf?
-    decr_destroy
+    reap do
+      decr_destroy
 
-    lb = LoadBalancer[name: kubernetes_nodepool.cluster.services_load_balancer_name]
-    lb&.dns_zone&.delete_record(record_name: "*.#{lb.hostname}.")
-    lb&.incr_destroy
-    kubernetes_nodepool.vms.each(&:incr_destroy)
-    kubernetes_nodepool.remove_all_vms
-    kubernetes_nodepool.destroy
-    pop "kubernetes nodepool is deleted"
+      kubernetes_nodepool.vms.each(&:incr_destroy)
+      kubernetes_nodepool.remove_all_vms
+      kubernetes_nodepool.destroy
+      pop "kubernetes nodepool is deleted"
+    end
   end
 end

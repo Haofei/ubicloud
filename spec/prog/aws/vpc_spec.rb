@@ -11,7 +11,7 @@ RSpec.describe Prog::Aws::Vpc do
 
   let(:ps) {
     prj = Project.create_with_id(name: "test-prj")
-    loc = Location.create_with_id(name: "us-east-1", provider: "aws", project_id: prj.id, display_name: "aws-us-east-1", ui_name: "AWS US East 1", visible: true)
+    loc = Location.create_with_id(name: "us-west-2", provider: "aws", project_id: prj.id, display_name: "aws-us-west-2", ui_name: "AWS US East 1", visible: true)
     LocationCredential.create_with_id(access_key: "test-access-key", secret_key: "test-secret-key") { it.id = loc.id }
     ps = Prog::Vnet::SubnetNexus.assemble(prj.id, name: "test-ps", location_id: loc.id).subject
     PrivateSubnetAwsResource.create { it.id = ps.id }
@@ -24,7 +24,7 @@ RSpec.describe Prog::Aws::Vpc do
 
   before do
     allow(nx).to receive(:private_subnet).and_return(ps)
-    expect(Aws::EC2::Client).to receive(:new).with(access_key_id: "test-access-key", secret_access_key: "test-secret-key", region: "us-east-1").and_return(client)
+    expect(Aws::EC2::Client).to receive(:new).with(access_key_id: "test-access-key", secret_access_key: "test-secret-key", region: "us-west-2").and_return(client)
   end
 
   describe "#create_vpc" do
@@ -51,7 +51,7 @@ RSpec.describe Prog::Aws::Vpc do
       client.stub_responses(:describe_vpcs, vpcs: [{state: "available"}])
 
       expect(client).to receive(:describe_vpcs).with({filters: [{name: "vpc-id", values: [ps.name]}]}).and_call_original
-      expect(client).to receive(:create_security_group).with({group_name: "aws-us-east-1-#{ps.ubid}", description: "Security group for aws-us-east-1-#{ps.ubid}", vpc_id: ps.name, tag_specifications: [{resource_type: "security-group", tags: [{key: "Ubicloud", value: "true"}]}]}).and_call_original
+      expect(client).to receive(:create_security_group).with({group_name: "aws-us-west-2-#{ps.ubid}", description: "Security group for aws-us-west-2-#{ps.ubid}", vpc_id: ps.name, tag_specifications: [{resource_type: "security-group", tags: [{key: "Ubicloud", value: "true"}]}]}).and_call_original
       ps.firewalls.map { it.firewall_rules.map { |fw| fw.destroy } }
       FirewallRule.create_with_id(firewall_id: ps.firewalls.first.id, cidr: "0.0.0.1/32", port_range: 22..80)
       ps.reload
@@ -130,6 +130,12 @@ RSpec.describe Prog::Aws::Vpc do
   describe "#destroy" do
     before do
       ps.private_subnet_aws_resource.update(subnet_id: "subnet-0123456789abcdefg", security_group_id: "sg-0123456789abcdefg", internet_gateway_id: "igw-0123456789abcdefg")
+      client.stub_responses(:describe_subnets, subnets: [{state: "available"}])
+    end
+
+    it "naps if subnet is not available" do
+      client.stub_responses(:describe_subnets, subnets: [{state: "pending"}])
+      expect { nx.destroy }.to nap(5)
     end
 
     it "deletes the subnet and hops to delete_security_group" do
@@ -139,8 +145,13 @@ RSpec.describe Prog::Aws::Vpc do
     end
 
     it "hops to delete_security_group if subnet is not found" do
-      client.stub_responses(:delete_subnet, Aws::EC2::Errors::InvalidSubnetIDNotFound.new(nil, nil))
+      client.stub_responses(:describe_subnets, subnets: [])
       expect { nx.destroy }.to hop("delete_security_group")
+    end
+
+    it "naps if delete_subnet gives dependency violation" do
+      client.stub_responses(:delete_subnet, Aws::EC2::Errors::DependencyViolation.new(nil, nil))
+      expect { nx.destroy }.to nap(5)
     end
 
     it "deletes the security group and hops to delete_internet_gateway" do

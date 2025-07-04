@@ -2,17 +2,10 @@
 
 require_relative "../../model/spec_helper"
 
-class MockStringWithExitstatus < String
-  attr_accessor :exitstatus
-
-  def initialize(str, exitstatus = 0)
-    super(str)
-    self.exitstatus = exitstatus
-  end
-end
-
 RSpec.describe Prog::Kubernetes::UpgradeKubernetesNode do
-  subject(:prog) { described_class.new(Strand.new) }
+  subject(:prog) { described_class.new(st) }
+
+  let(:st) { Strand.new }
 
   let(:project) {
     Project.create(name: "default")
@@ -60,21 +53,18 @@ RSpec.describe Prog::Kubernetes::UpgradeKubernetesNode do
     end
 
     it "exits when kubernetes cluster is deleted and has no children itself" do
+      st.update(prog: "Kubernetes::UpgradeKubernetesNode", label: "somestep", stack: [{}])
       prog.before_run # Nothing happens
 
       kubernetes_cluster.strand.label = "destroy"
-      prog.strand.label = "somestep"
-      expect(prog).to receive(:reap)
-      expect(prog).to receive(:leaf?).and_return(true)
       expect { prog.before_run }.to exit({"msg" => "upgrade cancelled"})
     end
 
     it "donates when kubernetes cluster is deleted and but has a child" do
+      st.update(prog: "Kubernetes::UpgradeKubernetesNode", label: "somestep", stack: [{}])
+      Strand.create(parent_id: st.id, prog: "Kubernetes::ProvisionKubernetesNode", label: "start", stack: [{}], lease: Time.now + 10)
       kubernetes_cluster.strand.label = "destroy"
-      prog.strand.label = "somestep"
-      expect(prog).to receive(:reap)
-      expect(prog).to receive(:leaf?).and_return(false)
-      expect { prog.before_run }.to nap(1)
+      expect { prog.before_run }.to nap(120)
     end
   end
 
@@ -92,17 +82,15 @@ RSpec.describe Prog::Kubernetes::UpgradeKubernetesNode do
 
   describe "#wait_new_node" do
     it "donates if there are sub-programs running" do
-      expect(prog).to receive(:reap).and_return([])
-      expect(prog).to receive(:donate).and_call_original
-
-      expect { prog.wait_new_node }.to nap(1)
+      st.update(prog: "Kubernetes::UpgradeKubernetesNode", label: "wait_new_node", stack: [{}])
+      Strand.create(parent_id: st.id, prog: "Kubernetes::ProvisionKubernetesNode", label: "start", stack: [{}], lease: Time.now + 10)
+      expect { prog.wait_new_node }.to nap(120)
     end
 
     it "hops to assign_role if there are no sub-programs running" do
-      expect(prog).to receive(:reap).and_return([instance_double(Strand, exitval: {"vm_id" => "12345"})])
-
+      st.update(prog: "Kubernetes::UpgradeKubernetesNode", label: "wait_new_node", stack: [{}])
+      Strand.create(parent_id: st.id, prog: "Kubernetes::ProvisionKubernetesNode", label: "start", stack: [{}], exitval: {"vm_id" => "12345"})
       expect { prog.wait_new_node }.to hop("drain_old_node")
-
       expect(prog.strand.stack.first["new_vm_id"]).to eq "12345"
     end
   end
@@ -190,20 +178,16 @@ RSpec.describe Prog::Kubernetes::UpgradeKubernetesNode do
     end
 
     it "deletes the node object from kubernetes" do
-      result = instance_double(MockStringWithExitstatus)
       client = instance_double(Kubernetes::Client)
       expect(kubernetes_cluster).to receive(:client).and_return(client)
-      expect(client).to receive(:delete_node).with(prog.old_vm.name).and_return(result)
-      expect(result).to receive(:exitstatus).and_return(0)
+      expect(client).to receive(:delete_node).with(prog.old_vm.name).and_return(Net::SSH::Connection::Session::StringWithExitstatus.new("success", 0))
       expect { prog.delete_node_object }.to hop("destroy_node")
     end
 
     it "raises if the error of delete node command is not successful" do
-      result = instance_double(MockStringWithExitstatus)
       client = instance_double(Kubernetes::Client)
       expect(kubernetes_cluster).to receive(:client).and_return(client)
-      expect(client).to receive(:delete_node).with(prog.old_vm.name).and_return(result)
-      expect(result).to receive(:exitstatus).and_return(1)
+      expect(client).to receive(:delete_node).with(prog.old_vm.name).and_return(Net::SSH::Connection::Session::StringWithExitstatus.new("failed", 1))
       expect { prog.delete_node_object }.to raise_error(RuntimeError)
     end
   end

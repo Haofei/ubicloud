@@ -102,14 +102,13 @@ RSpec.describe Prog::Vnet::NicNexus do
 
   describe "#wait_aws_nic_created" do
     it "reaps and hops to wait if leaf" do
-      expect(nx).to receive(:reap)
-      expect(nx).to receive(:leaf?).and_return(true)
+      st.update(prog: "Vnet::NicNexus", label: "wait_aws_nic_created", stack: [{}])
       expect { nx.wait_aws_nic_created }.to hop("wait")
     end
 
     it "naps if not leaf" do
-      expect(nx).to receive(:reap)
-      expect(nx).to receive(:leaf?).and_return(false)
+      st.update(prog: "Vnet::NicNexus", label: "wait_aws_nic_created", stack: [{}])
+      Strand.create(parent_id: st.id, prog: "Aws::Nic", label: "create_network_interface", stack: [{}], lease: Time.now + 10)
       expect { nx.wait_aws_nic_created }.to nap(10)
     end
   end
@@ -268,17 +267,18 @@ RSpec.describe Prog::Vnet::NicNexus do
 
   describe "#wait_aws_nic_destroyed" do
     it "reaps and destroys nic if leaf" do
-      expect(nx).to receive(:reap)
-      expect(nx).to receive(:leaf?).and_return(true)
+      st.update(prog: "Vnet::NicNexus", label: "wait_aws_nic_destroyed", stack: [{}])
       nic = instance_double(Nic, id: "0a9a166c-e7e7-4447-ab29-7ea442b5bb0e")
-      expect(nx).to receive(:nic).and_return(nic)
+      expect(nx).to receive(:nic).and_return(nic).at_least(:once)
       expect(nic).to receive(:destroy)
+      expect(nic).to receive(:private_subnet).and_return(ps)
+      expect(ps).to receive(:incr_refresh_keys)
       expect { nx.wait_aws_nic_destroyed }.to exit({"msg" => "nic deleted"})
     end
 
     it "naps if not leaf" do
-      expect(nx).to receive(:reap)
-      expect(nx).to receive(:leaf?).and_return(false)
+      st.update(prog: "Vnet::NicNexus", label: "wait_aws_nic_destroyed", stack: [{}])
+      Strand.create(parent_id: st.id, prog: "Aws::Nic", label: "destroy", stack: [{}], lease: Time.now + 10)
       expect { nx.wait_aws_nic_destroyed }.to nap(10)
     end
   end

@@ -151,20 +151,21 @@ end
 
 # Table: load_balancer
 # Columns:
-#  id                          | uuid           | PRIMARY KEY
-#  name                        | text           | NOT NULL
-#  algorithm                   | lb_algorithm   | NOT NULL DEFAULT 'round_robin'::lb_algorithm
-#  private_subnet_id           | uuid           | NOT NULL
-#  health_check_endpoint       | text           | NOT NULL
-#  health_check_interval       | integer        | NOT NULL DEFAULT 10
-#  health_check_timeout        | integer        | NOT NULL DEFAULT 5
-#  health_check_up_threshold   | integer        | NOT NULL DEFAULT 5
-#  health_check_down_threshold | integer        | NOT NULL DEFAULT 3
-#  health_check_protocol       | lb_hc_protocol | NOT NULL DEFAULT 'http'::lb_hc_protocol
-#  custom_hostname             | text           |
-#  custom_hostname_dns_zone_id | uuid           |
-#  stack                       | lb_stack       | NOT NULL DEFAULT 'dual'::lb_stack
-#  project_id                  | uuid           | NOT NULL
+#  id                          | uuid                     | PRIMARY KEY
+#  name                        | text                     | NOT NULL
+#  algorithm                   | lb_algorithm             | NOT NULL DEFAULT 'round_robin'::lb_algorithm
+#  private_subnet_id           | uuid                     | NOT NULL
+#  health_check_endpoint       | text                     | NOT NULL
+#  health_check_interval       | integer                  | NOT NULL DEFAULT 10
+#  health_check_timeout        | integer                  | NOT NULL DEFAULT 5
+#  health_check_up_threshold   | integer                  | NOT NULL DEFAULT 5
+#  health_check_down_threshold | integer                  | NOT NULL DEFAULT 3
+#  health_check_protocol       | lb_hc_protocol           | NOT NULL DEFAULT 'http'::lb_hc_protocol
+#  custom_hostname             | text                     |
+#  custom_hostname_dns_zone_id | uuid                     |
+#  stack                       | lb_stack                 | NOT NULL DEFAULT 'dual'::lb_stack
+#  project_id                  | uuid                     | NOT NULL
+#  created_at                  | timestamp with time zone | NOT NULL DEFAULT CURRENT_TIMESTAMP
 # Indexes:
 #  load_balancer_pkey                        | PRIMARY KEY btree (id)
 #  load_balancer_custom_hostname_key         | UNIQUE btree (custom_hostname)
@@ -185,5 +186,6 @@ end
 #  inference_endpoint   | inference_endpoint_load_balancer_id_fkey   | (load_balancer_id) REFERENCES load_balancer(id)
 #  inference_router     | inference_router_load_balancer_id_fkey     | (load_balancer_id) REFERENCES load_balancer(id)
 #  kubernetes_cluster   | kubernetes_cluster_api_server_lb_id_fkey   | (api_server_lb_id) REFERENCES load_balancer(id)
+#  kubernetes_cluster   | kubernetes_cluster_services_lb_id_fkey     | (services_lb_id) REFERENCES load_balancer(id)
 #  load_balancer_port   | load_balancer_port_load_balancer_id_fkey   | (load_balancer_id) REFERENCES load_balancer(id)
 #  load_balancers_vms   | load_balancers_vms_load_balancer_id_fkey   | (load_balancer_id) REFERENCES load_balancer(id)

@@ -28,13 +28,16 @@ class Prog::Aws::Nic < Prog::Base
   label def wait_network_interface_created
     network_interface_response = client.describe_network_interfaces({filters: [{name: "network-interface-id", values: [nic.name]}, {name: "tag:Ubicloud", values: ["true"]}]}).network_interfaces[0]
     if network_interface_response.status == "available"
-      eip_response = client.allocate_address
-      nic.nic_aws_resource.update(eip_allocation_id: eip_response.allocation_id)
-
-      hop_attach_eip_network_interface
+      hop_allocate_eip
     end
 
     nap 1
+  end
+
+  label def allocate_eip
+    eip_response = client.allocate_address
+    nic.nic_aws_resource.update(eip_allocation_id: eip_response.allocation_id)
+    hop_attach_eip_network_interface
   end
 
   label def attach_eip_network_interface
@@ -48,18 +51,16 @@ class Prog::Aws::Nic < Prog::Base
 
   label def destroy
     ignore_invalid_nic do
+      nap 5 if client.describe_network_interfaces({filters: [{name: "network-interface-id", values: [nic.name]}, {name: "tag:Ubicloud", values: ["true"]}]}).network_interfaces.first&.status == "in-use"
       client.delete_network_interface({network_interface_id: nic.name})
     end
     hop_release_eip
   end
 
   label def release_eip
-    begin
-      client.release_address({allocation_id: nic.nic_aws_resource.eip_allocation_id})
-    rescue Aws::EC2::Errors::InvalidAllocationIDNotFound
-      # Ignore if the address is not found
-      # This can happen if the address was already released or never existed
-      # In this case, we just pop the stack
+    ignore_invalid_nic do
+      allocation_id = nic.nic_aws_resource&.eip_allocation_id
+      client.release_address({allocation_id: allocation_id}) if allocation_id
     end
     pop "nic destroyed"
   end
@@ -83,6 +84,11 @@ class Prog::Aws::Nic < Prog::Base
 
   def ignore_invalid_nic
     yield
-  rescue Aws::EC2::Errors::InvalidNetworkInterfaceIDNotFound
+  rescue Aws::EC2::Errors::InvalidNetworkInterfaceIDNotFound,
+    Aws::EC2::Errors::InvalidNetworkInterfaceIdMalformed,
+    Aws::EC2::Errors::InvalidNetworkInterfaceIDMalformed,
+    Aws::EC2::Errors::InvalidAllocationIDNotFound,
+    Aws::EC2::Errors::InvalidAllocationIDMalformed => e
+    Clog.emit("ID not found or malformed") { {exception: {error_code: e.code, error_message: e.message}} }
   end
 end

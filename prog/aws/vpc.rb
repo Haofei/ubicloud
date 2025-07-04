@@ -119,32 +119,54 @@ class Prog::Aws::Vpc < Prog::Base
   end
 
   label def destroy
-    client.delete_subnet({subnet_id: private_subnet.private_subnet_aws_resource.subnet_id})
-    hop_delete_security_group
-  rescue Aws::EC2::Errors::InvalidSubnetIDNotFound
+    subnet = client.describe_subnets({filters: [{name: "subnet-id", values: [private_subnet.private_subnet_aws_resource.subnet_id]}]}).subnets.first
+    hop_delete_security_group unless subnet
+
+    nap 5 if subnet.state != "available"
+    begin
+      client.delete_subnet({subnet_id: private_subnet.private_subnet_aws_resource.subnet_id})
+    rescue Aws::EC2::Errors::DependencyViolation
+      nap 5
+    end
     hop_delete_security_group
   end
 
   label def delete_security_group
-    client.delete_security_group({group_id: private_subnet.private_subnet_aws_resource.security_group_id})
-    hop_delete_internet_gateway
-  rescue Aws::EC2::Errors::InvalidGroupNotFound
+    ignore_invalid_id do
+      client.delete_security_group({group_id: private_subnet.private_subnet_aws_resource.security_group_id})
+    end
     hop_delete_internet_gateway
   end
 
   label def delete_internet_gateway
-    client.detach_internet_gateway({internet_gateway_id: private_subnet.private_subnet_aws_resource.internet_gateway_id, vpc_id: private_subnet.name})
-    client.delete_internet_gateway({internet_gateway_id: private_subnet.private_subnet_aws_resource.internet_gateway_id})
-    hop_delete_vpc
-  rescue Aws::EC2::Errors::InvalidInternetGatewayIDNotFound
+    ignore_invalid_id do
+      client.detach_internet_gateway({internet_gateway_id: private_subnet.private_subnet_aws_resource.internet_gateway_id, vpc_id: private_subnet.name})
+      client.delete_internet_gateway({internet_gateway_id: private_subnet.private_subnet_aws_resource.internet_gateway_id})
+    end
     hop_delete_vpc
   end
 
   label def delete_vpc
-    client.delete_vpc({vpc_id: private_subnet.name})
+    ignore_invalid_id do
+      client.delete_vpc({vpc_id: private_subnet.name})
+    end
     pop "vpc destroyed"
-  rescue Aws::EC2::Errors::InvalidVpcIDNotFound
-    pop "vpc destroyed"
+  end
+
+  def ignore_invalid_id
+    yield
+  rescue Aws::EC2::Errors::InvalidSubnetIDNotFound,
+    Aws::EC2::Errors::InvalidSubnetIdNotFound,
+    Aws::EC2::Errors::InvalidSubnetIDMalformed,
+    Aws::EC2::Errors::InvalidGroupNotFound,
+    Aws::EC2::Errors::InvalidGroupIDMalformed,
+    Aws::EC2::Errors::InvalidNetworkInterfaceIDNotFound,
+    Aws::EC2::Errors::InvalidNetworkInterfaceIdMalformed,
+    Aws::EC2::Errors::InvalidInternetGatewayIDNotFound,
+    Aws::EC2::Errors::InvalidInternetGatewayIdMalformed,
+    Aws::EC2::Errors::InvalidVpcIDNotFound,
+    Aws::EC2::Errors::InvalidVpcIDMalformed => e
+    Clog.emit("ID not found or malformed") { {exception: {error_code: e.code, error_message: e.message}} }
   end
 
   def location

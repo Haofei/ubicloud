@@ -211,7 +211,8 @@ class Clover < Roda
     when Sequel::SerializationFailure
       code = 500
       type = "InternalServerError"
-      message = e.message
+      message = "There was a temporary error attempting to make this change, please try again."
+      Clog.emit("route exception") { Util.exception_to_hash(e) }
     else
       raise e if Config.test? && e.message != "test error"
       Clog.emit("route exception") { Util.exception_to_hash(e) }
@@ -365,7 +366,15 @@ class Clover < Roda
     create_account_set_password? true
     password_confirm_label "Password Confirmation"
     before_create_account do
-      Validation.validate_cloudflare_turnstile(param("cf-turnstile-response"))
+      cf_response = scope.typecast_params.str("cf-turnstile-response").to_s if Config.cloudflare_turnstile_site_key
+
+      if cf_response&.empty?
+        Clog.emit("cloudflare turnstile parameter not submitted") { {user_agent: scope.env["HTTP_USER_AGENT"]} }
+        scope.flash["error"] = "Could not create account. Please ensure JavaScript is enabled and access to Cloudflare is not blocked, then try again."
+        request.redirect("/create-account")
+      end
+
+      Validation.validate_cloudflare_turnstile(cf_response)
       scope.before_rodauth_create_account(account, param("name"))
     end
     after_create_account do
@@ -483,7 +492,13 @@ class Clover < Roda
       account = Account[account_id]
       # Do not allow to close account if the project has resources and
       # the account is the only user
-      if (project = account.projects.find { it.accounts.count == 1 && it.has_resources })
+      projects_dataset = Project
+        .where(id: DB[:access_tag]
+          .select_group(:project_id)
+          .where(project_id: account.projects_dataset.select(Sequel[:project][:id]))
+          .having(Sequel.function(:count).* => 1))
+
+      if (project = projects_dataset.first_project_with_resources)
         fail DependencyError.new("'#{project.name}' project has some resources. Delete all related resources first.")
       end
     end
@@ -704,16 +719,15 @@ class Clover < Roda
 
       check_csrf!
       rodauth.load_memory
+      rodauth.check_active_session
 
       r.root do
-        if rodauth.logged_in?
+        if current_account
           redirect_default_project_dashboard
         else
           r.redirect rodauth.login_route
         end
       end
-
-      rodauth.check_active_session
     end
 
     r.rodauth

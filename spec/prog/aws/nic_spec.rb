@@ -11,7 +11,7 @@ RSpec.describe Prog::Aws::Nic do
 
   let(:nic) {
     prj = Project.create_with_id(name: "test-prj")
-    loc = Location.create_with_id(name: "us-east-1", provider: "aws", project_id: prj.id, display_name: "aws-us-east-1", ui_name: "AWS US East 1", visible: true)
+    loc = Location.create_with_id(name: "us-west-2", provider: "aws", project_id: prj.id, display_name: "aws-us-west-2", ui_name: "AWS US East 1", visible: true)
     LocationCredential.create_with_id(access_key: "test-access-key", secret_key: "test-secret-key") { it.id = loc.id }
     ps = Prog::Vnet::SubnetNexus.assemble(prj.id, name: "test-ps", location_id: loc.id).subject
     PrivateSubnetAwsResource.create(subnet_id: "subnet-0123456789abcdefg", security_group_id: "sg-0123456789abcdefg") { it.id = ps.id }
@@ -26,7 +26,7 @@ RSpec.describe Prog::Aws::Nic do
 
   before do
     allow(nx).to receive(:nic).and_return(nic)
-    allow(Aws::EC2::Client).to receive(:new).with(access_key_id: "test-access-key", secret_access_key: "test-secret-key", region: "us-east-1").and_return(client)
+    allow(Aws::EC2::Client).to receive(:new).with(access_key_id: "test-access-key", secret_access_key: "test-secret-key", region: "us-west-2").and_return(client)
   end
 
   describe "#create_network_interface" do
@@ -51,9 +51,17 @@ RSpec.describe Prog::Aws::Nic do
       client.stub_responses(:describe_network_interfaces, network_interfaces: [{status: "available"}])
       client.stub_responses(:allocate_address, allocation_id: "eip-0123456789abcdefg")
       expect(client).to receive(:describe_network_interfaces).with({filters: [{name: "network-interface-id", values: [nic.name]}, {name: "tag:Ubicloud", values: ["true"]}]}).and_call_original
-      expect(nic.nic_aws_resource).to receive(:update).with(eip_allocation_id: "eip-0123456789abcdefg").and_call_original
 
-      expect { nx.wait_network_interface_created }.to hop("attach_eip_network_interface")
+      expect { nx.wait_network_interface_created }.to hop("allocate_eip")
+    end
+  end
+
+  describe "#allocate_eip" do
+    it "allocates an elastic ip" do
+      client.stub_responses(:allocate_address, allocation_id: "eip-0123456789abcdefg")
+      expect(client).to receive(:allocate_address).and_call_original
+      expect(nic.nic_aws_resource).to receive(:update).with(eip_allocation_id: "eip-0123456789abcdefg")
+      expect { nx.allocate_eip }.to hop("attach_eip_network_interface")
     end
   end
 
@@ -67,9 +75,21 @@ RSpec.describe Prog::Aws::Nic do
   end
 
   describe "#destroy" do
+    it "naps if the network interface is in use" do
+      client.stub_responses(:describe_network_interfaces, network_interfaces: [{status: "in-use"}])
+      expect { nx.destroy }.to nap(5)
+    end
+
     it "deletes the network interface" do
+      client.stub_responses(:describe_network_interfaces, network_interfaces: [{status: "available"}])
       client.stub_responses(:delete_network_interface)
       expect(client).to receive(:delete_network_interface).with({network_interface_id: nic.name}).and_call_original
+      expect { nx.destroy }.to hop("release_eip")
+    end
+
+    it "doesn't nap if network_interfaces are empty" do
+      client.stub_responses(:describe_network_interfaces, network_interfaces: [])
+      client.stub_responses(:delete_network_interface, Aws::EC2::Errors::InvalidNetworkInterfaceIDNotFound.new(nil, "The network interface 'eni-0123456789abcdefg' does not exist."))
       expect { nx.destroy }.to hop("release_eip")
     end
 
@@ -81,9 +101,24 @@ RSpec.describe Prog::Aws::Nic do
 
   describe "#release_eip" do
     it "releases the elastic ip" do
-      expect(nic.nic_aws_resource).to receive(:eip_allocation_id).and_return("eip-0123456789abcdefg")
+      expect(nic.nic_aws_resource).to receive(:eip_allocation_id).and_return("eip-0123456789abcdefg").at_least(:once)
       client.stub_responses(:release_address)
       expect(client).to receive(:release_address).with({allocation_id: "eip-0123456789abcdefg"}).and_call_original
+      expect { nx.release_eip }.to exit({"msg" => "nic destroyed"})
+    end
+
+    it "gracefully continues if the nic is not found" do
+      expect(nic.nic_aws_resource).to receive(:eip_allocation_id).and_return(nil).at_least(:once)
+      expect { nx.release_eip }.to exit({"msg" => "nic destroyed"})
+    end
+
+    it "gracefully continues if the nic_aws_resource is not found" do
+      expect(nic).to receive(:nic_aws_resource).and_return(nil).at_least(:once)
+      expect { nx.release_eip }.to exit({"msg" => "nic destroyed"})
+    end
+
+    it "continues if the eip_allocation_id is found" do
+      expect(nic.nic_aws_resource).to receive(:eip_allocation_id).and_return("eip-0123456789abcdefg").at_least(:once)
       expect { nx.release_eip }.to exit({"msg" => "nic destroyed"})
     end
 

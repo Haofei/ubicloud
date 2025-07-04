@@ -68,52 +68,55 @@ class Clover
     end
 
     r.on "caches" do
-      # listCache
-      r.get true do
-        unless (key = typecast_params.nonempty_str("key"))
-          fail CloverError.new(204, "NotFound", "No cache entry")
-        end
-
-        scopes = [runner.workflow_job&.dig("head_branch"), repository.default_branch].compact
-        entries = repository.cache_entries_dataset
-          .exclude(committed_at: nil)
-          .where(key: key, scope: scopes)
-          .order(:version).all
-
-        {
-          totalCount: entries.count,
-          artifactCaches: entries.map do
-            {
-              scope: it.scope,
-              cacheKey: it.key,
-              cacheVersion: it.version,
-              creationTime: it.created_at
-            }
+      r.is do
+        # listCache
+        r.get do
+          unless (key = typecast_params.nonempty_str("key"))
+            fail CloverError.new(204, "NotFound", "No cache entry")
           end
-        }
-      end
 
-      # reserveCache
-      r.post true do
-        key, version = typecast_params.nonempty_str!(%w[key version])
-        size = typecast_params.pos_int("cacheSize")
+          scopes = [runner.workflow_job&.dig("head_branch"), repository.default_branch].compact
+          entries = repository.cache_entries_dataset
+            .exclude(committed_at: nil)
+            .where(key: key, scope: scopes)
+            .order(:version).all
 
-        unless (scope = runner.workflow_job&.dig("head_branch") || get_scope_from_github(runner, typecast_params.nonempty_str("runId")))
-          Clog.emit("The runner does not have a workflow job") { {no_workflow_job: {ubid: runner.ubid, repository_ubid: repository.ubid}} }
-          fail CloverError.new(400, "InvalidRequest", "No workflow job data available")
+          {
+            totalCount: entries.count,
+            artifactCaches: entries.map do
+              {
+                scope: it.scope,
+                cacheKey: it.key,
+                cacheVersion: it.version,
+                creationTime: it.created_at
+              }
+            end
+          }
         end
 
-        if size && size > GithubRepository::CACHE_SIZE_LIMIT
-          fail CloverError.new(400, "InvalidRequest", "The cache size is over the 10GB limit")
-        end
+        # reserveCache
+        r.post do
+          key, version = typecast_params.nonempty_str!(%w[key version])
+          size = typecast_params.pos_int("cacheSize")
 
-        entry, upload_id = nil, nil
-        DB.transaction do
-          begin
-            entry = GithubCacheEntry.create_with_id(repository_id: runner.repository.id, key: key, version: version, size: size, scope: scope, created_by: runner.id)
-          rescue Sequel::ValidationFailed, Sequel::UniqueConstraintViolation
+          unless (scope = runner.workflow_job&.dig("head_branch") || get_scope_from_github(runner, typecast_params.nonempty_str("runId")))
+            Clog.emit("The runner does not have a workflow job") { {no_workflow_job: {ubid: runner.ubid, repository_ubid: repository.ubid}} }
+            fail CloverError.new(400, "InvalidRequest", "No workflow job data available")
+          end
+
+          if size && size > GithubRepository::CACHE_SIZE_LIMIT
+            fail CloverError.new(400, "InvalidRequest", "The cache size is over the 10GB limit")
+          end
+
+          unless GithubCacheEntry.where(repository_id: runner.repository.id, scope:, key:, version:).empty?
             fail CloverError.new(409, "AlreadyExists", "A cache entry for #{scope} scope already exists with #{key} key and #{version} version.")
           end
+
+          # Need id for blob_key, but don't save record yet
+          entry = GithubCacheEntry.new_with_id(repository_id: runner.repository.id, key:, version:, size:, scope:, created_by: runner.id)
+          blob_key = entry.blob_key
+          bucket = repository.bucket_name
+          blob_storage_client = repository.blob_storage_client
 
           # Token creation on Cloudflare R2 takes time to propagate. Since that point is the
           # first time we use the credentials, we are waiting it to be propagated. Note that,
@@ -122,7 +125,7 @@ class Clover
           # entry for a repository.
           retries = 0
           begin
-            upload_id = repository.blob_storage_client.create_multipart_upload(bucket: repository.bucket_name, key: entry.blob_key).upload_id
+            upload_id = blob_storage_client.create_multipart_upload(bucket:, key: blob_key).upload_id
           rescue Aws::S3::Errors::Unauthorized, Aws::S3::Errors::InternalError, Aws::S3::Errors::NoSuchBucket => ex
             retries += 1
             if retries < 3
@@ -136,24 +139,28 @@ class Clover
             end
           end
 
-          entry.update(upload_id:)
+          begin
+            entry.update(upload_id:)
+          rescue Sequel::ValidationFailed, Sequel::UniqueConstraintViolation
+            fail CloverError.new(409, "AlreadyExists", "A cache entry for #{scope} scope already exists with #{key} key and #{version} version.")
+          end
+
+          # If size is not provided, it means that the client doesn't
+          # let us know the size of the cache. In this case, we use the
+          # GithubRepository::CACHE_SIZE_LIMIT as the size.
+          size ||= GithubRepository::CACHE_SIZE_LIMIT
+
+          max_chunk_size = 32 * 1024 * 1024 # 32MB
+          presigned_urls = (1..size.fdiv(max_chunk_size).ceil).map do
+            repository.url_presigner.presigned_url(:upload_part, bucket: repository.bucket_name, key: entry.blob_key, upload_id: upload_id, part_number: it, expires_in: 900)
+          end
+
+          {
+            uploadId: upload_id,
+            presignedUrls: presigned_urls,
+            chunkSize: max_chunk_size
+          }
         end
-
-        # If size is not provided, it means that the client doesn't
-        # let us know the size of the cache. In this case, we use the
-        # GithubRepository::CACHE_SIZE_LIMIT as the size.
-        size ||= GithubRepository::CACHE_SIZE_LIMIT
-
-        max_chunk_size = 32 * 1024 * 1024 # 32MB
-        presigned_urls = (1..size.fdiv(max_chunk_size).ceil).map do
-          repository.url_presigner.presigned_url(:upload_part, bucket: repository.bucket_name, key: entry.blob_key, upload_id: upload_id, part_number: it, expires_in: 900)
-        end
-
-        {
-          uploadId: upload_id,
-          presignedUrls: presigned_urls,
-          chunkSize: max_chunk_size
-        }
       end
 
       # commitCache
@@ -175,6 +182,9 @@ class Clover
         rescue Aws::S3::Errors::InvalidPart, Aws::S3::Errors::NoSuchUpload => ex
           Clog.emit("could not complete multipart upload") { {failed_multipart_upload: {ubid: runner.ubid, repository_ubid: repository.ubid, exception: Util.exception_to_hash(ex)}} }
           fail CloverError.new(400, "InvalidRequest", "Wrong parameters")
+        rescue Aws::S3::Errors::ServiceUnavailable => ex
+          Clog.emit("s3 service unavailable") { {failed_multipart_upload: {ubid: runner.ubid, repository_ubid: repository.ubid, exception: Util.exception_to_hash(ex)}} }
+          fail CloverError.new(503, "ServiceUnavailable", "Service unavailable")
         end
 
         updates = {committed_at: Time.now}

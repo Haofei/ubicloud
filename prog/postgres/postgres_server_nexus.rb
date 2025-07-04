@@ -15,12 +15,8 @@ class Prog::Postgres::PostgresServerNexus < Prog::Base
       ubid = PostgresServer.generate_ubid
 
       postgres_resource = PostgresResource[resource_id]
-      boot_image = if postgres_resource.location.provider == "aws"
-        case postgres_resource.version
-        when "16" then Config.aws_based_postgres_16_ubuntu_2204_ami_version
-        when "17" then Config.aws_based_postgres_17_ubuntu_2204_ami_version
-        else raise "Unsupported PostgreSQL version for AWS: #{postgres_resource.version}"
-        end
+      boot_image = if postgres_resource.location.aws?
+        postgres_resource.location.pg_ami(postgres_resource.version)
       else
         flavor_suffix = case postgres_resource.flavor
         when PostgresResource::Flavor::STANDARD then ""
@@ -45,6 +41,7 @@ class Prog::Postgres::PostgresServerNexus < Prog::Base
         boot_image: boot_image,
         private_subnet_id: postgres_resource.private_subnet_id,
         enable_ip4: true,
+        arch: Option::VmSizes.find { |it| it.name == postgres_resource.target_vm_size }.arch,
         exclude_host_ids: exclude_host_ids
       )
 
@@ -99,24 +96,20 @@ class Prog::Postgres::PostgresServerNexus < Prog::Base
   end
 
   label def wait_bootstrap_rhizome
-    reap
-    hop_mount_data_disk if leaf?
-    donate
+    reap(:mount_data_disk, nap: 5)
   end
 
   label def mount_data_disk
     case vm.sshable.cmd("common/bin/daemonizer --check format_disk")
     when "Succeeded"
       vm.sshable.cmd("sudo mkdir -p /dat")
-      device_path = vm.vm_storage_volumes.find { it.boot == false }.device_path.shellescape
 
-      vm.sshable.cmd("sudo common/bin/add_to_fstab #{device_path} /dat ext4 defaults 0 0")
-      vm.sshable.cmd("sudo mount #{device_path} /dat")
+      vm.sshable.cmd("sudo common/bin/add_to_fstab #{postgres_server.data_device_path} /dat ext4 defaults 0 0")
+      vm.sshable.cmd("sudo mount #{postgres_server.data_device_path} /dat")
 
       hop_configure_walg_credentials
     when "Failed", "NotStarted"
-      device_path = vm.vm_storage_volumes.find { it.boot == false }.device_path.shellescape
-      vm.sshable.cmd("common/bin/daemonizer 'sudo mkfs --type ext4 #{device_path}' format_disk")
+      vm.sshable.cmd("common/bin/daemonizer 'sudo mkfs --type ext4 #{postgres_server.data_device_path}' format_disk")
     end
 
     nap 5
@@ -264,7 +257,7 @@ TIMER
       vm.sshable.cmd("sudo systemctl enable --now prometheus")
       vm.sshable.cmd("sudo systemctl enable --now postgres-metrics.timer")
 
-      hop_configure
+      hop_setup_hugepages
     end
 
     vm.sshable.cmd("sudo systemctl reload postgres_exporter || sudo systemctl restart postgres_exporter")
@@ -272,6 +265,18 @@ TIMER
     vm.sshable.cmd("sudo systemctl reload prometheus || sudo systemctl restart prometheus")
 
     hop_wait
+  end
+
+  label def setup_hugepages
+    case vm.sshable.d_check("setup_hugepages")
+    when "Succeeded"
+      vm.sshable.d_clean("setup_hugepages")
+      hop_configure
+    when "Failed", "NotStarted"
+      vm.sshable.d_run("setup_hugepages", "sudo", "postgres/bin/setup-hugepages")
+    end
+
+    nap 5
   end
 
   label def configure
@@ -430,6 +435,11 @@ SQL
       hop_taking_over
     end
 
+    when_refresh_walg_credentials_set? do
+      decr_refresh_walg_credentials
+      refresh_walg_credentials
+    end
+
     if postgres_server.read_replica? && postgres_server.resource.parent
       nap 60 if postgres_server.lsn_caught_up
 
@@ -446,11 +456,12 @@ SQL
         update_stack_lsn(lsn)
         # Even if it is lagging, it has applied new wal files, so, we should
         # give it a chance to catch up
+        decr_recycle
         nap 15 * 60
       else
         # It has not applied any new wal files while has been napping for the
         # last 15 minutes, so, there should be something wrong, we are recycling
-        postgres_server.incr_recycle
+        postgres_server.incr_recycle unless postgres_server.recycle_set?
       end
       nap 60
     end
@@ -463,8 +474,8 @@ SQL
 
     nap 0 if postgres_server.trigger_failover
 
-    reap
-    nap 5 unless strand.children.select { it.prog == "Postgres::PostgresServerNexus" && it.label == "restart" }.empty?
+    reap(fallthrough: true)
+    nap 5 unless strand.children_dataset.where(prog: "Postgres::PostgresServerNexus", label: "restart").empty?
 
     if available?
       decr_checkup
@@ -477,10 +488,15 @@ SQL
 
   label def prepare_for_take_over
     decr_take_over
+    representative_server = postgres_server.resource.representative_server
+    hop_taking_over if representative_server.nil?
 
-    hop_taking_over if postgres_server.resource.representative_server.nil?
+    begin
+      representative_server.vm.sshable.cmd("sudo pg_ctlcluster #{postgres_server.resource.version} main stop -m immediate")
+    rescue *Sshable::SSH_CONNECTION_ERRORS, Sshable::SshError
+    end
 
-    postgres_server.resource.representative_server.incr_destroy
+    representative_server.incr_destroy
 
     nap 5
   end
@@ -532,7 +548,7 @@ SQL
 
     walg_config = postgres_server.timeline.generate_walg_config
     vm.sshable.cmd("sudo -u postgres tee /etc/postgresql/wal-g.env > /dev/null", stdin: walg_config)
-    vm.sshable.cmd("sudo tee /usr/lib/ssl/certs/blob_storage_ca.crt > /dev/null", stdin: postgres_server.timeline.blob_storage.root_certs)
+    vm.sshable.cmd("sudo tee /usr/lib/ssl/certs/blob_storage_ca.crt > /dev/null", stdin: postgres_server.timeline.blob_storage.root_certs) unless postgres_server.timeline.aws?
   end
 
   def available?

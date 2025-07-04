@@ -19,31 +19,41 @@ class Clover
       end
 
       filter[:location_id] = @location.id
-      firewall = @project.firewalls_dataset.eager(:location).first(filter)
+      firewall = @project.firewalls_dataset.first(filter)
       check_found_object(firewall)
 
-      r.delete true do
-        authorize("Firewall:delete", firewall.id)
-        firewall.private_subnets.map { authorize("PrivateSubnet:edit", it.id) }
-        DB.transaction do
-          firewall.destroy
-          audit_log(firewall, "destroy")
+      r.is do
+        r.delete do
+          authorize("Firewall:delete", firewall.id)
+          ds = firewall.private_subnets_dataset
+          unless ds.exclude(id: dataset_authorize(ds, "PrivateSubnet:edit").select(:id)).empty?
+            fail Authorization::Unauthorized
+          end
+
+          DB.transaction do
+            firewall.destroy
+            audit_log(firewall, "destroy")
+          end
+          204
         end
-        204
-      end
 
-      r.get true do
-        authorize("Firewall:view", firewall.id)
-        @firewall = Serializers::Firewall.serialize(firewall, {detailed: true})
+        r.get do
+          authorize("Firewall:view", firewall.id)
+          @firewall = Serializers::Firewall.serialize(firewall, {detailed: true})
 
-        if api?
-          @firewall
-        else
-          project_subnets = dataset_authorize(@project.private_subnets_dataset.eager(:location).where(location_id: @location.id), "PrivateSubnet:view").all
-          attached_subnets = firewall.private_subnets_dataset.eager(:location).all
-          @attachable_subnets = Serializers::PrivateSubnet.serialize(project_subnets.reject { |ps| attached_subnets.find { |as| as.id == ps.id } })
+          if api?
+            @firewall
+          else
+            attachable_subnets_dataset = dataset_authorize(@project
+                .private_subnets_dataset
+                .eager(:location)
+                .where(location_id: @location.id),
+              "PrivateSubnet:view")
+              .exclude(id: firewall.private_subnets_dataset.select(:id))
+            @attachable_subnets = Serializers::PrivateSubnet.serialize(attachable_subnets_dataset.all)
 
-          view "networking/firewall/show"
+            view "networking/firewall/show"
+          end
         end
       end
 

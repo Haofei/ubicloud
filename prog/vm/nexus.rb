@@ -41,7 +41,6 @@ class Prog::Vm::Nexus < Prog::Base
     storage_volumes.each_with_index do |volume, disk_index|
       volume[:size_gib] ||= vm_size.storage_size_options.first
       volume[:skip_sync] ||= false
-      volume[:max_ios_per_sec] ||= vm_size.io_limits.max_ios_per_sec
       volume[:max_read_mbytes_per_sec] ||= vm_size.io_limits.max_read_mbytes_per_sec
       volume[:max_write_mbytes_per_sec] ||= vm_size.io_limits.max_write_mbytes_per_sec
       volume[:encrypted] = true if !volume.has_key? :encrypted
@@ -119,7 +118,21 @@ class Prog::Vm::Nexus < Prog::Base
         gpu_count = 1
         gpu_device = "27b0"
       end
-      label = (location.provider == "aws") ? "start_aws" : "start"
+
+      label = if location.provider == "aws"
+        storage_volumes.each_with_index do |volume, disk_index|
+          VmStorageVolume.create_with_id(
+            vm_id: vm.id,
+            size_gib: volume[:size_gib],
+            boot: volume[:boot],
+            use_bdev_ubi: false,
+            disk_index: disk_index
+          )
+        end
+        "start_aws"
+      else
+        "start"
+      end
 
       Strand.create(
         prog: "Vm::Nexus",
@@ -194,9 +207,7 @@ class Prog::Vm::Nexus < Prog::Base
   end
 
   label def wait_aws_vm_started
-    reap
-    hop_wait_sshable if leaf?
-    nap 10
+    reap(:wait_sshable, nap: 10)
   end
 
   label def start
@@ -503,7 +514,6 @@ class Prog::Vm::Nexus < Prog::Base
     vm.update(display_state: "deleting")
     if vm.location.provider == "aws"
       bud Prog::Aws::Instance, {"subject_id" => vm.id}, :destroy
-      vm.nics.map(&:incr_destroy)
       hop_wait_aws_vm_destroyed
     end
 
@@ -554,12 +564,10 @@ class Prog::Vm::Nexus < Prog::Base
   end
 
   label def wait_aws_vm_destroyed
-    reap
-    if leaf?
+    reap(nap: 10) do
       final_clean_up
       pop "vm deleted"
     end
-    nap 10
   end
 
   label def wait_lb_expiry

@@ -19,7 +19,7 @@ class PostgresResource < Sequel::Model
   plugin :association_dependencies, firewall_rules: :destroy, metric_destinations: :destroy
   dataset_module Pagination
 
-  plugin ResourceMethods
+  plugin ResourceMethods, redacted_columns: [:root_cert_1, :root_cert_2, :server_cert]
   include SemaphoreMethods
   include ObjectTag::Cleanup
 
@@ -43,11 +43,6 @@ class PostgresResource < Sequel::Model
   def display_state
     return "deleting" if destroy_set? || strand.nil? || strand.label == "destroy"
     return "unavailable" if representative_server&.strand&.label == "unavailable"
-    if strand.children.any? { it.prog == "Postgres::ConvergePostgresResource" }
-      return "converging" if has_enough_ready_servers? && in_maintenance_window?
-      return "waiting for maintenance window" if has_enough_ready_servers? && !in_maintenance_window?
-      return "preparing for convergence"
-    end
     return "running" if ["wait", "refresh_certificates", "refresh_dns_record"].include?(strand.label) && !initial_provisioning_set?
     "creating"
   end
@@ -73,7 +68,7 @@ class PostgresResource < Sequel::Model
       host: hn,
       port: 5432,
       path: "/postgres",
-      query: "channel_binding=require"
+      query: "sslmode=require"
     ).to_s
   end
 
@@ -90,7 +85,7 @@ class PostgresResource < Sequel::Model
   end
 
   def target_standby_count
-    TARGET_STANDBY_COUNT_MAP[ha_type]
+    Option::POSTGRES_HA_OPTIONS[ha_type].standby_count
   end
 
   def target_server_count
@@ -150,15 +145,9 @@ class PostgresResource < Sequel::Model
     LANTERN = "lantern"
   end
 
-  TARGET_STANDBY_COUNT_MAP = {HaType::NONE => 0, HaType::ASYNC => 1, HaType::SYNC => 2}.freeze
-
   DEFAULT_VERSION = "17"
 
   MAINTENANCE_DURATION_IN_HOURS = 2
-
-  def self.redacted_columns
-    super + [:root_cert_1, :root_cert_2, :server_cert]
-  end
 end
 
 # Table: postgres_resource
@@ -187,6 +176,8 @@ end
 #  version                     | postgres_version         | NOT NULL DEFAULT '16'::postgres_version
 #  location_id                 | uuid                     | NOT NULL
 #  maintenance_window_start_at | integer                  |
+#  user_config                 | jsonb                    | NOT NULL DEFAULT '{}'::jsonb
+#  pgbouncer_user_config       | jsonb                    | NOT NULL DEFAULT '{}'::jsonb
 # Indexes:
 #  postgres_server_pkey                               | PRIMARY KEY btree (id)
 #  postgres_resource_project_id_location_id_name_uidx | UNIQUE btree (project_id, location_id, name)

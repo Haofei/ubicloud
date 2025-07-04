@@ -77,6 +77,9 @@ module Config
   override :force_ssl, true, bool
   override :port, 3000, int
   override :pretty_json, false, bool
+  override :dispatcher_max_threads, 8, int
+  override :dispatcher_min_threads, 1, int
+  override :dispatcher_queue_size_ratio, 4, float
   override :puma_max_threads, 16, int
   override :puma_min_threads, 1, int
   override :puma_workers, 3, int
@@ -129,6 +132,9 @@ module Config
   # Spdk
   override :spdk_version, "v23.09-ubi-0.3"
 
+  # Vhost Block Backend
+  override :vhost_block_backend_version, "v0.1-6"
+
   # Boot Images
   override :default_boot_image_name, "ubuntu-jammy", string
 
@@ -158,10 +164,9 @@ module Config
   override :ubuntu_jammy_version, "20250508", string
   override :debian_12_version, "20250428-2096", string
   override :almalinux_9_version, "9.5-20241120", string
-  override :github_ubuntu_2404_version, "20250511.1.1", string
-  override :github_ubuntu_2204_version, "20250511.1.1", string
-  override :github_ubuntu_2004_version, "20250406.1.1", string
-  override :github_gpu_ubuntu_2204_version, "20250511.1.1", string
+  override :github_ubuntu_2404_version, "20250622.1.0", string
+  override :github_ubuntu_2204_version, "20250622.1.0", string
+  override :github_gpu_ubuntu_2204_version, "20250622.1.0", string
   override :postgres16_ubuntu_2204_version, "20250425.1.1", string
   override :postgres17_ubuntu_2204_version, "20250425.1.1", string
   override :postgres16_paradedb_ubuntu_2204_version, "20250425.1.1", string
@@ -172,8 +177,8 @@ module Config
   override :kubernetes_v1_32_version, "20250320.1.0", string
   override :kubernetes_v1_33_version, "20250506.1.0", string
 
-  override :aws_based_postgres_16_ubuntu_2204_ami_version, "ami-030c060f85668b37d", string
-  override :aws_based_postgres_17_ubuntu_2204_ami_version, "ami-095e7210597188ca5", string
+  override :aws_based_postgres_16_ubuntu_2204_ami_version, "ami-0c15093fa829f190a", string
+  override :aws_based_postgres_17_ubuntu_2204_ami_version, "ami-0c8f8ddefeb7bd695", string
 
   # Allocator
   override :allocator_target_host_utilization, 0.55, float
@@ -219,4 +224,7 @@ module Config
   optional :invoices_blob_storage_endpoint, string
   optional :invoices_blob_storage_access_key, string, clear: true
   optional :invoices_blob_storage_secret_key, string, clear: true
+
+  # Monitoring
+  optional :monitoring_service_project_id, string
 end

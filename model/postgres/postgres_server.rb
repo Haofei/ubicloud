@@ -19,7 +19,8 @@ class PostgresServer < Sequel::Model
   include MetricsTargetMethods
 
   semaphore :initial_provisioning, :refresh_certificates, :update_superuser_password, :checkup
-  semaphore :restart, :configure, :take_over, :configure_prometheus, :configure_metrics, :destroy, :recycle, :promote
+  semaphore :restart, :configure, :take_over, :configure_metrics, :destroy, :recycle, :promote
+  semaphore :refresh_walg_credentials
 
   def configure_hash
     configs = {
@@ -55,7 +56,8 @@ class PostgresServer < Sequel::Model
       "lc_monetary" => "'C.UTF-8'",
       "lc_numeric" => "'C.UTF-8'",
       "lc_time" => "'C.UTF-8'",
-      "shared_preload_libraries" => "'pg_cron,pg_stat_statements'"
+      "shared_preload_libraries" => "'pg_cron,pg_stat_statements'",
+      "cron.use_background_workers" => "on"
     }
 
     if resource.flavor == PostgresResource::Flavor::PARADEDB
@@ -96,6 +98,8 @@ class PostgresServer < Sequel::Model
 
     {
       configs: configs,
+      user_config: resource.user_config,
+      pgbouncer_user_config: resource.pgbouncer_user_config,
       private_subnets: vm.private_subnets.map {
         {
           net4: it.net4.to_s,
@@ -278,6 +282,17 @@ class PostgresServer < Sequel::Model
       metrics_dir: "/home/ubi/postgres/metrics",
       project_id: Config.postgres_service_project_id
     }
+  end
+
+  def data_device_path
+    if vm.location.aws?
+      # On AWS, pick the largest block device to use as the data disk,
+      # since the device path detected by the VmStorageVolume is not always
+      # correct.
+      vm.sshable.cmd("lsblk -b -d -o NAME,SIZE | sort -n -k2 | tail -n1 |  awk '{print \"/dev/\"$1}'").strip
+    else
+      vm.vm_storage_volumes.find { it.boot == false }.device_path.shellescape
+    end
   end
 end
 
