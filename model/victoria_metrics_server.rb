@@ -7,15 +7,9 @@ class VictoriaMetricsServer < Sequel::Model
   many_to_one :vm
   many_to_one :resource, class: :VictoriaMetricsResource, key: :victoria_metrics_resource_id
 
-  plugin ResourceMethods
-  include SemaphoreMethods
+  plugin ResourceMethods, redacted_columns: :cert, encrypted_columns: :cert_key
+  plugin SemaphoreMethods, :checkup, :destroy, :initial_provisioning, :restart, :reconfigure
   include HealthMonitorMethods
-
-  semaphore :checkup, :destroy, :initial_provisioning, :restart, :reconfigure
-
-  plugin :column_encryption do |enc|
-    enc.column :cert_key
-  end
 
   def public_ipv6_address
     vm.ip6.to_s
@@ -73,10 +67,6 @@ class VictoriaMetricsServer < Sequel::Model
       username: resource.admin_user,
       password: resource.admin_password
     )
-  end
-
-  def self.redacted_columns
-    super + [:cert]
   end
 end
 

@@ -59,21 +59,6 @@ class Prog::Test < Prog::Base
     pop frame["test_level"]
   end
 
-  label def synchronized
-    th = Thread.list.find { it.name == "clover_test" }
-    w = th[:clover_test_in]
-    th.thread_variable_set(:clover_test_out, Thread.current)
-    w.close
-    pop "done"
-  end
-
-  label def wait_exit
-    th = Thread.list.find { it.name == "clover_test" }
-    r = th[:clover_test_in]
-    r.read
-    pop "done"
-  end
-
   label def hop_entry
     hop_hop_exit
   end
@@ -84,16 +69,15 @@ class Prog::Test < Prog::Base
 
   label def reaper
     # below loop is only for ensuring we are able to process reaped strands
-    reap.each do |st|
-      st.exitval
-    end
-    donate
+    reap(reaper: :exitval.to_proc)
   end
 
   label def reap_exit_no_children
-    reap
-    pop({msg: "reap_exit_no_children"}) if leaf?
-    donate
+    reap { pop({msg: "reap_exit_no_children"}) }
+  end
+
+  label def failer
+    fail "failure"
   end
 
   label def napper
@@ -119,12 +103,12 @@ class Prog::Test < Prog::Base
 
   label def increment_semaphore
     incr_test_semaphore
-    donate
+    nap 1
   end
 
   label def decrement_semaphore
     decr_test_semaphore
-    donate
+    nap 1
   end
 
   label def set_expired_deadline

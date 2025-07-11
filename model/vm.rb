@@ -19,6 +19,7 @@ class Vm < Sequel::Model
   many_to_many :load_balancer_vm_ports, join_table: :load_balancers_vms, right_key: :id, right_primary_key: :load_balancer_vm_id, class: :LoadBalancerVmPort, read_only: true
   many_to_one :vm_host_slice
   many_to_one :location, key: :location_id
+  one_to_one :aws_instance, key: :id
 
   many_through_many :firewalls,
     [
@@ -31,11 +32,10 @@ class Vm < Sequel::Model
 
   dataset_module Pagination
 
-  plugin ResourceMethods
-  include SemaphoreMethods
+  plugin ResourceMethods, redacted_columns: :public_key
+  plugin SemaphoreMethods, :destroy, :start_after_host_reboot, :prevent_destroy, :update_firewall_rules,
+    :checkup, :update_spdk_dependency, :waiting_for_capacity, :lb_expiry_started, :restart, :stop
   include HealthMonitorMethods
-  semaphore :destroy, :start_after_host_reboot, :prevent_destroy, :update_firewall_rules, :checkup, :update_spdk_dependency, :waiting_for_capacity, :lb_expiry_started
-  semaphore :restart, :stop
 
   include ObjectTag::Cleanup
 
@@ -56,7 +56,7 @@ class Vm < Sequel::Model
   end
 
   def ip6
-    (location.provider == "aws") ? ephemeral_net6.nth(0) : ephemeral_net6&.nth(2)
+    location.aws? ? ephemeral_net6&.nth(0) : ephemeral_net6&.nth(2)
   end
 
   def nic
@@ -204,10 +204,6 @@ class Vm < Sequel::Model
     incr_update_spdk_dependency
   end
 
-  def self.redacted_columns
-    super + [:public_key]
-  end
-
   def params_json(swap_size_bytes: nil, ch_version: nil, firmware_version: nil, hugepages: nil)
     topo = cloud_hypervisor_cpu_topology
 
@@ -252,13 +248,17 @@ class Vm < Sequel::Model
         "disk_index" => s.disk_index,
         "encrypted" => !s.key_encryption_key_1.nil?,
         "spdk_version" => s.spdk_version,
+        "vhost_block_backend_version" => s.vhost_block_backend_version,
         "use_bdev_ubi" => s.use_bdev_ubi,
         "skip_sync" => s.skip_sync,
         "storage_device" => s.storage_device.name,
         "read_only" => s.size_gib == 0,
-        "max_ios_per_sec" => s.max_ios_per_sec,
         "max_read_mbytes_per_sec" => s.max_read_mbytes_per_sec,
-        "max_write_mbytes_per_sec" => s.max_write_mbytes_per_sec
+        "max_write_mbytes_per_sec" => s.max_write_mbytes_per_sec,
+        "slice_name" => vm_host_slice&.inhost_name || "system.slice",
+        "num_queues" => s.num_queues,
+        "queue_size" => s.queue_size,
+        "copy_on_read" => false
       }
     }
   end

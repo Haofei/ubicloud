@@ -5,6 +5,7 @@ require_relative "../../model"
 class KubernetesCluster < Sequel::Model
   one_to_one :strand, key: :id
   many_to_one :api_server_lb, class: :LoadBalancer
+  many_to_one :services_lb, class: :LoadBalancer
   many_to_one :private_subnet
   many_to_one :project
   many_to_many :cp_vms, join_table: :kubernetes_clusters_cp_vms, class: :Vm, order: :created_at
@@ -15,14 +16,12 @@ class KubernetesCluster < Sequel::Model
   dataset_module Pagination
 
   plugin ResourceMethods
-  include SemaphoreMethods
+  plugin SemaphoreMethods, :destroy, :sync_kubernetes_services, :upgrade
   include HealthMonitorMethods
-
-  semaphore :destroy, :sync_kubernetes_services, :upgrade
 
   def validate
     super
-    errors.add(:cp_node_count, "must be greater than 0") if cp_node_count <= 0
+    errors.add(:cp_node_count, "must be a positive integer") unless cp_node_count.is_a?(Integer) && cp_node_count > 0
     errors.add(:version, "must be a valid Kubernetes version") unless Option.kubernetes_versions.include?(version)
   end
 
@@ -134,6 +133,7 @@ end
 #  target_node_size             | text                     | NOT NULL
 #  target_node_storage_size_gib | bigint                   |
 #  location_id                  | uuid                     | NOT NULL
+#  services_lb_id               | uuid                     |
 # Indexes:
 #  kubernetes_cluster_pkey                             | PRIMARY KEY btree (id)
 #  kubernetes_cluster_project_id_location_id_name_uidx | UNIQUE btree (project_id, location_id, name)
@@ -142,6 +142,7 @@ end
 #  kubernetes_cluster_location_id_fkey       | (location_id) REFERENCES location(id)
 #  kubernetes_cluster_private_subnet_id_fkey | (private_subnet_id) REFERENCES private_subnet(id)
 #  kubernetes_cluster_project_id_fkey        | (project_id) REFERENCES project(id)
+#  kubernetes_cluster_services_lb_id_fkey    | (services_lb_id) REFERENCES load_balancer(id)
 # Referenced By:
 #  kubernetes_clusters_cp_vms | kubernetes_clusters_cp_vms_kubernetes_cluster_id_fkey | (kubernetes_cluster_id) REFERENCES kubernetes_cluster(id)
 #  kubernetes_nodepool        | kubernetes_nodepool_kubernetes_cluster_id_fkey        | (kubernetes_cluster_id) REFERENCES kubernetes_cluster(id)

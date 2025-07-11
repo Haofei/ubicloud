@@ -84,6 +84,11 @@ class Clover < Roda
     end
   end
 
+  def omniauth_provider_name(provider)
+    omniauth_providers.each { |sym, name| return name if sym.name == provider }
+    OidcProvider.name_for_ubid(provider) || provider
+  end
+
   def omniauth_providers
     @omniauth_providers ||= [
       # :nocov:
@@ -137,7 +142,7 @@ class Clover < Roda
   def html_attrs(attributes)
     attributes.map do |key, value|
       case key
-      when :required, :checked
+      when :required, :checked, :readonly
         case value
         when true
           key.name

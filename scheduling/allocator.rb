@@ -132,8 +132,7 @@ module Scheduling::Allocator
     def self.candidate_hosts(request)
       ds = DB[:vm_host]
         .join(:storage_devices, vm_host_id: Sequel[:vm_host][:id])
-        .join(:total_ipv4, routed_to_host_id: Sequel[:vm_host][:id])
-        .join(:used_ipv4, routed_to_host_id: Sequel[:vm_host][:id])
+        .join(:available_ipv4, routed_to_host_id: Sequel[:vm_host][:id])
         .left_join(:gpus, vm_host_id: Sequel[:vm_host][:id])
         .left_join(:vm_provisioning, vm_host_id: Sequel[:vm_host][:id])
         .select(
@@ -148,8 +147,7 @@ module Scheduling::Allocator
           :available_storage_gib,
           :total_storage_gib,
           :storage_devices,
-          :total_ipv4,
-          :used_ipv4,
+          :ipv4_available,
           Sequel.function(:coalesce, :num_gpus, 0).as(:num_gpus),
           Sequel.function(:coalesce, :available_gpus, 0).as(:available_gpus),
           :available_iommu_groups,
@@ -158,13 +156,12 @@ module Scheduling::Allocator
           :family
         )
         .where(arch: request.arch_filter)
-        .with(:total_ipv4, DB[:address]
+        .with(:available_ipv4, DB[:ipv4_address]
+          .left_join(:assigned_vm_address, ip: :ip)
+          .join(:address, [:cidr])
+          .where { assigned_vm_address[:ip] =~ nil }
           .select_group(:routed_to_host_id)
-          .select_append { round(sum(power(2, 32 - masklen(cidr)))).cast(:integer).as(total_ipv4) }
-          .where { (family(cidr) =~ 4) })
-        .with(:used_ipv4, DB[:address].left_join(:assigned_vm_address, address_id: :id)
-          .select_group(:routed_to_host_id)
-          .select_append { (count(Sequel[:assigned_vm_address][:id]) + 1).as(used_ipv4) })
+          .select_append { (count.function.* > 0).as(:ipv4_available) })
         .with(:storage_devices, DB[:storage_device]
           .select_group(:vm_host_id)
           .select_append { count.function.*.as(num_storage_devices) }
@@ -229,7 +226,7 @@ module Scheduling::Allocator
           .exclude(Sequel[table_alias][:activated_at] => nil)
       end
 
-      ds = ds.where { used_ipv4 < total_ipv4 } if request.ip4_enabled
+      ds = ds.where(:ipv4_available) if request.ip4_enabled
       ds = ds.where { available_gpus >= request.gpu_count } if request.gpu_count > 0
       ds = ds.where(Sequel[:vm_host][:id] => request.host_filter) unless request.host_filter.empty?
       ds = ds.exclude(Sequel[:vm_host][:id] => request.host_exclusion_filter) unless request.host_exclusion_filter.empty?
@@ -570,6 +567,19 @@ module Scheduling::Allocator
       rand_choice.id
     end
 
+    def self.allocate_vhost_block_backend(backends)
+      total_weight = backends.sum(&:allocation_weight)
+      fail "Total weight of all eligible vhost_block_backends shouldn't be zero." if total_weight == 0
+
+      rand_point = rand(total_weight)
+      weight_sum = 0
+      rand_choice = backends.find do |si|
+        weight_sum += si.allocation_weight
+        weight_sum > rand_point
+      end
+      rand_choice.id
+    end
+
     private
 
     def allocate_boot_image(vm_host, boot_image_name)
@@ -597,7 +607,13 @@ module Scheduling::Allocator
 
     def create_storage_volumes(vm, vm_host)
       @request.storage_volumes.each do |disk_index, volume|
-        spdk_installation_id = StorageAllocation.allocate_spdk_installation(vm_host.spdk_installations)
+        if vm_host.vhost_block_backends_dataset.exclude(allocation_weight: 0).empty?
+          spdk_installation_id = StorageAllocation.allocate_spdk_installation(vm_host.spdk_installations)
+          use_bdev_ubi = SpdkInstallation[spdk_installation_id].supports_bdev_ubi? && volume["boot"]
+        else
+          vhost_block_backend_id = StorageAllocation.allocate_vhost_block_backend(vm_host.vhost_block_backends)
+          use_bdev_ubi = false
+        end
 
         key_encryption_key = if volume["encrypted"]
           key_wrapping_algorithm = "aes-256-gcm"
@@ -623,14 +639,14 @@ module Scheduling::Allocator
           vm_id: vm.id,
           boot: volume["boot"],
           size_gib: volume["size_gib"],
-          use_bdev_ubi: SpdkInstallation[spdk_installation_id].supports_bdev_ubi? && volume["boot"],
+          use_bdev_ubi:,
           boot_image_id: image_id,
           skip_sync: volume["skip_sync"],
           disk_index: disk_index,
           key_encryption_key_1_id: key_encryption_key&.id,
           spdk_installation_id: spdk_installation_id,
+          vhost_block_backend_id:,
           storage_device_id: @volume_to_device_map[disk_index],
-          max_ios_per_sec: volume["max_ios_per_sec"],
           max_read_mbytes_per_sec: volume["max_read_mbytes_per_sec"],
           max_write_mbytes_per_sec: volume["max_write_mbytes_per_sec"]
         )

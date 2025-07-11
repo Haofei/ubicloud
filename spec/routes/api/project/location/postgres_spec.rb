@@ -89,6 +89,7 @@ RSpec.describe Clover, "postgres" do
       it "success" do
         post "/project/#{project.ubid}/location/eu-central-h1/postgres/test-postgres-no-ha", {
           size: "standard-2",
+          storage_size: "64",
           ha_type: "none"
         }.to_json
 
@@ -97,6 +98,7 @@ RSpec.describe Clover, "postgres" do
 
         post "/project/#{project.ubid}/location/eu-central-h1/postgres/test-postgres-async", {
           size: "standard-2",
+          storage_size: "64",
           ha_type: "async"
         }.to_json
 
@@ -105,6 +107,7 @@ RSpec.describe Clover, "postgres" do
 
         post "/project/#{project.ubid}/location/eu-central-h1/postgres/test-postgres-sync", {
           size: "standard-2",
+          storage_size: "64",
           ha_type: "sync"
         }.to_json
 
@@ -118,6 +121,7 @@ RSpec.describe Clover, "postgres" do
 
         post "/project/#{project.ubid}/location/eu-central-h1/postgres/test-postgres-no-ha", {
           size: "standard-2",
+          storage_size: "64",
           flavor: "paradedb"
         }.to_json
 
@@ -128,6 +132,7 @@ RSpec.describe Clover, "postgres" do
         project.set_ff_postgres_lantern(false)
         post "/project/#{project.ubid}/location/eu-central-h1/postgres/test-postgres-lantern", {
           size: "standard-2",
+          storage_size: "64",
           flavor: "lantern"
         }.to_json
         expect(last_response.status).to eq(400)
@@ -136,19 +141,30 @@ RSpec.describe Clover, "postgres" do
       it "invalid location" do
         post "/project/#{project.ubid}/location/eu-north-h1/postgres/test-postgres", {
           size: "standard-2",
+          storage_size: "64",
           ha_type: "sync"
         }.to_json
 
-        expect(last_response).to have_api_error(400, "Validation failed for following fields: location", {"location" => "Given location is not a valid postgres location. Available locations: [\"eu-central-h1\", \"us-east-a2\"]"})
+        expect(last_response).to have_api_error(400, "Validation failed for following fields: location", {"location" => "Invalid location. Available options: eu-central-h1, us-east-a2"})
       end
 
       it "location not exist" do
         post "/project/#{project.ubid}/location/not-exist-location/postgres/test-postgres", {
           size: "standard-2",
+          storage_size: "64",
           ha_type: "sync"
         }.to_json
 
         expect(last_response).to have_api_error(404, "Validation failed for following path components: location")
+      end
+
+      it "invalid size" do
+        post "/project/#{project.ubid}/location/#{pg.display_location}/postgres/test-postgres", {
+          size: "invalid-size",
+          storage_size: "64"
+        }.to_json
+
+        expect(last_response).to have_api_error(400, "Validation failed for following fields: size", {"size" => "Invalid size."})
       end
 
       it "can update database properties" do
@@ -194,6 +210,17 @@ RSpec.describe Clover, "postgres" do
       end
 
       it "returns error message if current usage is unknown" do
+        pg.representative_server.vm.add_vm_storage_volume(boot: false, size_gib: 128, disk_index: 0)
+
+        patch "/project/#{project.ubid}/location/#{pg.display_location}/postgres/#{pg.name}", {
+          size: "standard-3"
+        }.to_json
+
+        expect(pg.reload.target_vm_size).to eq("standard-2")
+        expect(last_response).to have_api_error(400, "Validation failed for following fields: size")
+      end
+
+      it "returns error message if invalid size is requested" do
         expect(project).to receive(:postgres_resources_dataset).and_return(instance_double(Sequel::Dataset, first: pg))
         expect(described_class).to receive(:authorized_project).with(user, project.id).and_return(project)
         expect(pg.representative_server).to receive(:storage_size_gib).and_return(128)
@@ -211,12 +238,27 @@ RSpec.describe Clover, "postgres" do
         expect(project).to receive(:postgres_resources_dataset).and_return(instance_double(Sequel::Dataset, first: pg))
         expect(described_class).to receive(:authorized_project).with(user, project.id).and_return(project)
         expect(Project).to receive(:[]).and_return(Project[Config.postgres_service_project_id]).thrice
+        expect(project).to receive(:quota_available?).and_return(true)
+        expect(pg.timeline).to receive(:earliest_restore_time).and_return(true)
 
         post "/project/#{project.ubid}/location/eu-central-h1/postgres/#{pg.name}/read-replica", {
           name: "my-read-replica"
         }.to_json
 
         expect(last_response.status).to eq(200)
+      end
+
+      it "fails read-replica creation if timeline doesn't have a backup yet" do
+        expect(project).to receive(:postgres_resources_dataset).and_return(instance_double(Sequel::Dataset, first: pg))
+        expect(described_class).to receive(:authorized_project).with(user, project.id).and_return(project)
+        expect(project).to receive(:quota_available?).and_return(true)
+        expect(pg.timeline).to receive(:earliest_restore_time).and_return(nil)
+
+        post "/project/#{project.ubid}/location/eu-central-h1/postgres/#{pg.name}/read-replica", {
+          name: "my-read-replica"
+        }.to_json
+
+        expect(last_response).to have_api_error(400, "Parent server is not ready for read replicas. There are no backups, yet.")
       end
 
       it "promote" do
@@ -326,13 +368,13 @@ RSpec.describe Clover, "postgres" do
       end
 
       it "reset password invalid restore" do
-        pg.representative_server.update(timeline_access: "fetch")
+        pg.update(parent_id: "cde85384-4cf1-8ad0-aeb0-639f2ad94870")
 
         post "/project/#{project.ubid}/location/#{pg.display_location}/postgres/#{pg.name}/reset-superuser-password", {
           password: "DummyPassword123"
         }.to_json
 
-        expect(last_response).to have_api_error(400, "Superuser password cannot be updated during restore!")
+        expect(last_response).to have_api_error(400, "Superuser password cannot be updated for read replicas!")
       end
 
       it "invalid password" do
@@ -377,6 +419,13 @@ RSpec.describe Clover, "postgres" do
 
         expect(last_response.status).to eq(400)
         expect(pg.reload.maintenance_window_start_at).to be_nil
+
+        post "/project/#{project.ubid}/location/#{pg.display_location}/postgres/#{pg.name}/set-maintenance-window", {
+          maintenance_window_start_at: -2
+        }.to_json
+
+        expect(last_response.status).to eq(400)
+        expect(pg.reload.maintenance_window_start_at).to be_nil
       end
 
       it "invalid payment" do
@@ -384,6 +433,7 @@ RSpec.describe Clover, "postgres" do
 
         post "/project/#{project.ubid}/location/#{TEST_LOCATION}/postgres/test-postgres", {
           size: "standard-2",
+          storage_size: "64",
           ha_type: "sync"
         }.to_json
 
@@ -400,7 +450,7 @@ RSpec.describe Clover, "postgres" do
       before do
         allow(Config).to receive(:postgres_service_project_id).and_return(prj.id)
         allow(VictoriaMetricsResource).to receive(:first).with(project_id: prj.id).and_return(vmr)
-        allow(vmr).to receive(:servers).and_return([vm_server])
+        allow(vmr).to receive(:servers_dataset).and_return([vm_server])
         allow(project).to receive(:postgres_resources_dataset).and_return(instance_double(Sequel::Dataset, first: pg))
       end
 
@@ -491,7 +541,7 @@ RSpec.describe Clover, "postgres" do
       end
 
       it "returns 404 when victoria_metrics servers are not available" do
-        allow(vmr).to receive(:servers).and_return([])
+        allow(vmr).to receive(:servers_dataset).and_return([])
         get "/project/#{project.ubid}/location/#{pg.display_location}/postgres/#{pg.name}/metrics"
 
         expect(last_response.status).to eq(404)
@@ -645,6 +695,51 @@ RSpec.describe Clover, "postgres" do
         delete "/project/#{project.ubid}/location/#{pg.display_location}/postgres/#{pg.name}/metric-destination/et000000000000000000000000"
 
         expect(last_response.status).to eq(204)
+      end
+    end
+
+    describe "config" do
+      it "read" do
+        pg.update(user_config: {"max_connections" => "100"}, pgbouncer_user_config: {"max_client_conn" => "100"})
+
+        get "/project/#{project.ubid}/location/#{pg.display_location}/postgres/#{pg.name}/config"
+
+        expect(last_response.status).to eq(200)
+        response_body = JSON.parse(last_response.body)
+        expect(response_body["pg_config"]).to eq({"max_connections" => "100"})
+        expect(response_body["pgbouncer_config"]).to eq({"max_client_conn" => "100"})
+      end
+
+      it "full update" do
+        pg.update(user_config: {"max_connections" => "100"}, pgbouncer_user_config: {"max_client_conn" => "100"})
+        post "/project/#{project.ubid}/location/#{pg.display_location}/postgres/#{pg.name}/config", {
+          pg_config: {"huge_pages" => "on"},
+          pgbouncer_config: {"admin_users" => "postgres"}
+        }.to_json
+
+        expect(last_response.status).to eq(200)
+        response_body = JSON.parse(last_response.body)
+        expect(response_body["pg_config"]).to eq({"huge_pages" => "on"})
+        expect(response_body["pgbouncer_config"]).to eq({"admin_users" => "postgres"})
+
+        expect(pg.reload.user_config).to eq({"huge_pages" => "on"})
+        expect(pg.reload.pgbouncer_user_config).to eq({"admin_users" => "postgres"})
+      end
+
+      it "partial update" do
+        pg.update(user_config: {"max_connections" => "100", "default_transaction_isolation" => "serializable", "shared_buffers" => "128MB"}, pgbouncer_user_config: {"max_client_conn" => "100", "pool_mode" => "session"})
+        patch "/project/#{project.ubid}/location/#{pg.display_location}/postgres/#{pg.name}/config", {
+          pg_config: {"huge_pages" => "on", "max_connections" => "120", "default_transaction_isolation" => nil},
+          pgbouncer_config: {"admin_users" => "postgres", "pool_mode" => nil}
+        }.to_json
+
+        expect(last_response.status).to eq(200)
+        response_body = JSON.parse(last_response.body)
+        expect(response_body["pg_config"]).to eq({"max_connections" => "120", "huge_pages" => "on", "shared_buffers" => "128MB"})
+        expect(response_body["pgbouncer_config"]).to eq({"max_client_conn" => "100", "admin_users" => "postgres"})
+
+        expect(pg.reload.user_config).to eq({"max_connections" => "120", "huge_pages" => "on", "shared_buffers" => "128MB"})
+        expect(pg.reload.pgbouncer_user_config).to eq({"max_client_conn" => "100", "admin_users" => "postgres"})
       end
     end
   end

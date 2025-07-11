@@ -9,24 +9,14 @@ class Cert < Sequel::Model
 
   plugin :association_dependencies, certs_load_balancers: :destroy
 
-  plugin ResourceMethods
-  include SemaphoreMethods
-  semaphore :destroy, :restarted
-
-  plugin :column_encryption do |enc|
-    enc.column :account_key
-    enc.column :csr_key
-  end
+  plugin ResourceMethods, redacted_columns: :cert, encrypted_columns: [:account_key, :csr_key]
+  plugin SemaphoreMethods, :destroy, :restarted
 
   dataset_module do
     exclude :with_cert, cert: nil
     where(:needing_recert, Sequel::CURRENT_TIMESTAMP - Sequel.cast("60 days", :interval) < :created_at)
     where(:active, Sequel::CURRENT_TIMESTAMP - Sequel.cast("90 days", :interval) < :created_at)
     reverse(:by_most_recent, :created_at)
-  end
-
-  def self.redacted_columns
-    super + [:cert]
   end
 end
 

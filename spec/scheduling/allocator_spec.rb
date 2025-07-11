@@ -166,11 +166,10 @@ RSpec.describe Al do
                  used_cores: vmh.used_cores,
                  used_hugepages_1g: vmh.used_hugepages_1g,
                  vm_host_id: vmh.id,
-                 total_ipv4: 4,
+                 ipv4_available: true,
                  num_gpus: 0,
                  available_gpus: 0,
                  available_iommu_groups: nil,
-                 used_ipv4: 1,
                  vm_provisioning_count: 0,
                  accepts_slices: false,
                  family: "standard"}])
@@ -196,11 +195,10 @@ RSpec.describe Al do
                  used_cores: vmh.used_cores,
                  used_hugepages_1g: vmh.used_hugepages_1g,
                  vm_host_id: vmh.id,
-                 total_ipv4: 4,
+                 ipv4_available: true,
                  num_gpus: 0,
                  available_gpus: 0,
                  available_iommu_groups: nil,
-                 used_ipv4: 1,
                  vm_provisioning_count: 2,
                  accepts_slices: false,
                  family: "standard"}])
@@ -297,10 +295,15 @@ RSpec.describe Al do
       StorageDevice.create(vm_host_id: vmh1.id, name: "stor1", available_storage_gib: 100, total_storage_gib: 100)
       StorageDevice.create(vm_host_id: vmh2.id, name: "stor1", available_storage_gib: 100, total_storage_gib: 100)
       Address.create(cidr: "1.1.1.0/30", routed_to_host_id: vmh1.id)
-      Address.create(cidr: "2.1.1.0/32", routed_to_host_id: vmh2.id)
+      address = Address.create(cidr: "2.1.1.0/32", routed_to_host_id: vmh2.id)
       BootImage.create(name: "ubuntu-jammy", version: "20220202", vm_host_id: vmh1.id, activated_at: Time.now, size_gib: 3)
       BootImage.create(name: "ubuntu-jammy", version: "20220202", vm_host_id: vmh2.id, activated_at: Time.now, size_gib: 3)
 
+      cand = Al::Allocation.candidate_hosts(req)
+      expect(cand.size).to eq(2)
+
+      vm.update(project_id: Project.create(name: "test").id, public_key: "a a", cores: 1)
+      AssignedVmAddress.create(dst_vm_id: vm.id, address_id: address.id, ip: "2.1.1.0")
       cand = Al::Allocation.candidate_hosts(req)
       expect(cand.size).to eq(1)
       expect(cand.first[:vm_host_id]).to eq(vmh1.id)
@@ -726,11 +729,10 @@ RSpec.describe Al do
       vm = create_vm
       vol = [{
         "size_gib" => 5, "use_bdev_ubi" => false, "skip_sync" => false, "encrypted" => false,
-        "boot" => false, "max_ios_per_sec" => 100, "max_read_mbytes_per_sec" => 200,
+        "boot" => false, "max_read_mbytes_per_sec" => 200,
         "max_write_mbytes_per_sec" => 300, "rate_limit_bytes_write" => 400
       }]
       described_class.allocate(vm, vol)
-      expect(vm.reload.vm_storage_volumes.first.max_ios_per_sec).to eq(100)
       expect(vm.vm_storage_volumes.first.max_read_mbytes_per_sec).to eq(200)
       expect(vm.vm_storage_volumes.first.max_write_mbytes_per_sec).to eq(300)
     end
@@ -738,7 +740,6 @@ RSpec.describe Al do
     it "creates volume with no rate limits" do
       vm = create_vm
       described_class.allocate(vm, vol)
-      expect(vm.reload.vm_storage_volumes.first.max_ios_per_sec).to be_nil
       expect(vm.vm_storage_volumes.first.max_read_mbytes_per_sec).to be_nil
       expect(vm.vm_storage_volumes.first.max_write_mbytes_per_sec).to be_nil
     end
@@ -763,6 +764,24 @@ RSpec.describe Al do
       expect(StorageKeyEncryptionKey.count).to eq(1)
       expect(vm.vm_storage_volumes.first.key_encryption_key_1_id).not_to be_nil
       expect(vm.storage_secrets.count).to eq(1)
+    end
+
+    it "uses vhost block backend if available" do
+      vmh = VmHost.first
+      vhost_backend = VhostBlockBackend.create(vm_host_id: vmh.id, version: "v0.1-5", allocation_weight: 100)
+      vm = create_vm
+      described_class.allocate(vm, [{"size_gib" => 5, "use_bdev_ubi" => false, "skip_sync" => false, "encrypted" => true, "boot" => false}])
+      expect(vm.vm_storage_volumes.first.vhost_block_backend_id).to eq(vhost_backend.id)
+      expect(vm.vm_storage_volumes.first.spdk_installation_id).to be_nil
+    end
+
+    it "uses SPDK if vhost block backend has allocation_weight 0" do
+      vmh = VmHost.first
+      VhostBlockBackend.create(vm_host_id: vmh.id, version: "v0.1-5", allocation_weight: 0)
+      vm = create_vm
+      described_class.allocate(vm, [{"size_gib" => 5, "use_bdev_ubi" => false, "skip_sync" => false, "encrypted" => true, "boot" => false}])
+      expect(vm.vm_storage_volumes.first.vhost_block_backend_id).to be_nil
+      expect(vm.vm_storage_volumes.first.spdk_installation_id).to eq(vmh.spdk_installations.first.id)
     end
 
     it "allocates the latest active boot image for boot volumes" do
@@ -1358,6 +1377,26 @@ RSpec.describe Al do
       si_1 = SpdkInstallation.new(allocation_weight: 0) { it.id = SpdkInstallation.generate_uuid }
       si_2 = SpdkInstallation.new(allocation_weight: 100) { it.id = SpdkInstallation.generate_uuid }
       expect(Al::StorageAllocation.allocate_spdk_installation([si_1, si_2])).to eq(si_2.id)
+    end
+  end
+
+  describe "#allocate_vhost_block_backend" do
+    it "fails if total weight is zero" do
+      vbb_1 = VhostBlockBackend.new(allocation_weight: 0)
+      vbb_2 = VhostBlockBackend.new(allocation_weight: 0)
+
+      expect { Al::StorageAllocation.allocate_vhost_block_backend([vbb_1, vbb_2]) }.to raise_error "Total weight of all eligible vhost_block_backends shouldn't be zero."
+    end
+
+    it "chooses the only one if one provided" do
+      vbb_1 = VhostBlockBackend.new(allocation_weight: 100) { it.id = VhostBlockBackend.generate_uuid }
+      expect(Al::StorageAllocation.allocate_vhost_block_backend([vbb_1])).to eq(vbb_1.id)
+    end
+
+    it "doesn't return the one with zero weight" do
+      vbb_1 = VhostBlockBackend.new(allocation_weight: 0) { it.id = VhostBlockBackend.generate_uuid }
+      vbb_2 = VhostBlockBackend.new(allocation_weight: 100) { it.id = VhostBlockBackend.generate_uuid }
+      expect(Al::StorageAllocation.allocate_vhost_block_backend([vbb_1, vbb_2])).to eq(vbb_2.id)
     end
   end
 end

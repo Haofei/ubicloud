@@ -11,15 +11,9 @@ class MinioServer < Sequel::Model
   many_to_one :pool, key: :minio_pool_id, class: :MinioPool
   one_through_one :cluster, join_table: :minio_pool, left_primary_key: :minio_pool_id, left_key: :id, class: :MinioCluster
 
-  plugin ResourceMethods
-  include SemaphoreMethods
+  plugin ResourceMethods, redacted_columns: :cert, encrypted_columns: :cert_key
+  plugin SemaphoreMethods, :checkup, :destroy, :restart, :reconfigure, :refresh_certificates, :initial_provisioning
   include HealthMonitorMethods
-
-  semaphore :checkup, :destroy, :restart, :reconfigure, :refresh_certificates, :initial_provisioning
-
-  plugin :column_encryption do |enc|
-    enc.column :cert_key
-  end
 
   def generate_etc_hosts_entry
     entries = ["127.0.0.1 #{hostname}"]
@@ -97,13 +91,9 @@ class MinioServer < Sequel::Model
       endpoint: server_url,
       access_key: cluster.admin_user,
       secret_key: cluster.admin_password,
-      ssl_ca_file_data: cluster.root_certs + cert,
+      ssl_ca_data: cluster.root_certs + cert,
       socket: socket
     )
-  end
-
-  def self.redacted_columns
-    super + [:cert]
   end
 end
 

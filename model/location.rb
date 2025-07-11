@@ -41,8 +41,16 @@ class Location < Sequel::Model
   end
 
   # Private Locations only support Postgres resources for now
-  def has_resources
+  def has_resources?
     !postgres_resources_dataset.empty?
+  end
+
+  def aws?
+    provider == "aws"
+  end
+
+  def pg_ami(pg_version, arch)
+    PgAwsAmi.find(aws_location_name: name, pg_version:, arch:).aws_ami_id
   end
 end
 
@@ -70,6 +78,7 @@ end
 #  location_credential       | location_credential_id_fkey                | (id) REFERENCES location(id)
 #  minio_cluster             | minio_cluster_location_id_fkey             | (location_id) REFERENCES location(id)
 #  postgres_resource         | postgres_resource_location_id_fkey         | (location_id) REFERENCES location(id)
+#  postgres_timeline         | postgres_timeline_location_id_fkey         | (location_id) REFERENCES location(id)
 #  private_subnet            | private_subnet_location_id_fkey            | (location_id) REFERENCES location(id)
 #  victoria_metrics_resource | victoria_metrics_resource_location_id_fkey | (location_id) REFERENCES location(id)
 #  vm                        | vm_location_id_fkey                        | (location_id) REFERENCES location(id)
